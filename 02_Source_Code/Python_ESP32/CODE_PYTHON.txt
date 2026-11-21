@@ -1,0 +1,383 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+import serial
+import time
+
+# ================== SERIAL ==================
+SERIAL_PORT = "COM9"
+BAUD = 115200
+ser = serial.Serial(SERIAL_PORT, BAUD, timeout=0.1)
+time.sleep(2)
+
+# ================== CAMERA INDEX ==================
+IDX_LAP = 0
+IDX_IP  = 1   # Iriun
+
+# ================== SERVO LIMITS (SAFE) ==================
+INDEX_SERVO_MIN,  INDEX_SERVO_MAX  = 0, 112
+THUMB_SERVO_MIN,  THUMB_SERVO_MAX  = 0, 115
+MIDDLE_SERVO_MIN, MIDDLE_SERVO_MAX = 0, 112
+PINKY_SERVO_MIN,  PINKY_SERVO_MAX  = 0, 112
+
+# ================== FINGER CALIB (PIP angles) ==================
+FINGER_STRAIGHT = 180
+FINGER_BENT     = 74
+
+# ================== THUMB CONTROL (PINCH DIST) ==================
+PINCH_OPEN  = 0.22
+PINCH_CLOSE = 0.06
+PINCH_ACTIVE_TH = 0.10
+THUMB_EXT_TH = 0.20
+
+# ================== FILTER / SEND ==================
+DEADBAND = 2
+
+# Smooth for angles (old/new)
+SMOOTH_OLD = 0.70
+SMOOTH_NEW = 0.30
+
+PINCH_SMOOTH_OLD = 0.86
+PINCH_SMOOTH_NEW = 0.14
+
+# Landmark EMA (reduce jitter from sideways view)
+LM_ALPHA_IP  = 0.18
+LM_ALPHA_LAP = 0.18
+
+# Rate limit: limit how fast servo can change per frame
+MAX_STEP_PER_FRAME = 3  # smaller = smoother, more lag
+
+# If iPhone lost hand, use laptop as fallback for N frames
+FALLBACK_FRAMES = 10
+
+# ================== MEDIAPIPE ==================
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+hands_ip = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    model_complexity=0,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
+hands_lap = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    model_complexity=0,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
+
+# ================== HELPERS ==================
+def angle_3pts_3d(a, b, c):
+    a = np.array(a, dtype=float)
+    b = np.array(b, dtype=float)
+    c = np.array(c, dtype=float)
+    ba = a - b
+    bc = c - b
+    cosang = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-9)
+    cosang = np.clip(cosang, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cosang)))
+
+def map_range(x, in_min, in_max, out_min, out_max):
+    x = np.clip(x, in_min, in_max)
+    return int((x - in_min) * (out_max - out_min) / (in_max - in_min + 1e-9) + out_min)
+
+def clampi(v, lo, hi):
+    return int(np.clip(v, lo, hi))
+
+def dist2_norm(a, b):
+    dx = a.x - b.x
+    dy = a.y - b.y
+    return float((dx*dx + dy*dy) ** 0.5)
+
+def palm_center(lm):
+    cx = (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5.0
+    cy = (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5.0
+    cz = (lm[0].z + lm[5].z + lm[9].z + lm[13].z + lm[17].z) / 5.0
+    return (cx, cy, cz)
+
+def dist3_norm_point_to_xyz(lm_point, xyz):
+    dx = lm_point.x - xyz[0]
+    dy = lm_point.y - xyz[1]
+    dz = lm_point.z - xyz[2]
+    return float((dx*dx + dy*dy + dz*dz) ** 0.5)
+
+class EMA21:
+    """EMA filter for 21 landmark points (x,y,z) in normalized coordinates."""
+    def __init__(self, alpha=0.18):
+        self.alpha = alpha
+        self.y = None  # (21,3)
+
+    def update(self, pts_21x3):
+        x = np.array(pts_21x3, dtype=np.float32)
+        if self.y is None:
+            self.y = x
+        else:
+            self.y = self.alpha * x + (1.0 - self.alpha) * self.y
+        return self.y
+
+    def reset(self):
+        self.y = None
+
+def rate_limit(prev, new, max_step=3):
+    if prev is None:
+        return new
+    d = new - prev
+    if abs(d) <= max_step:
+        return new
+    return prev + np.sign(d) * max_step
+
+def choose_hand(res):
+    if res.multi_hand_landmarks:
+        return res.multi_hand_landmarks[0]
+    return None
+
+def compute_servos_from_landmarks(hand_lm, smooth_state):
+    """
+    hand_lm: mediapipe landmark list-like (21)
+    smooth_state: dict holding idx_smooth, mid_smooth, pky_smooth, pinch_smooth
+    return: idx_servo, thb_servo, mid_servo, pky_servo, debug
+    """
+    lm = hand_lm
+
+    # ===== Index (5-6-7) =====
+    idx_angle = angle_3pts_3d(
+        (lm[5].x, lm[5].y, lm[5].z),
+        (lm[6].x, lm[6].y, lm[6].z),
+        (lm[7].x, lm[7].y, lm[7].z),
+    )
+    if smooth_state["idx"] is None:
+        smooth_state["idx"] = idx_angle
+    else:
+        smooth_state["idx"] = SMOOTH_OLD*smooth_state["idx"] + SMOOTH_NEW*idx_angle
+
+    idx_servo = map_range(smooth_state["idx"], FINGER_BENT, FINGER_STRAIGHT, INDEX_SERVO_MAX, INDEX_SERVO_MIN)
+    idx_servo = clampi(idx_servo, INDEX_SERVO_MIN, INDEX_SERVO_MAX)
+
+    # ===== Middle (9-10-11) =====
+    mid_angle = angle_3pts_3d(
+        (lm[9].x, lm[9].y, lm[9].z),
+        (lm[10].x, lm[10].y, lm[10].z),
+        (lm[11].x, lm[11].y, lm[11].z),
+    )
+    if smooth_state["mid"] is None:
+        smooth_state["mid"] = mid_angle
+    else:
+        smooth_state["mid"] = SMOOTH_OLD*smooth_state["mid"] + SMOOTH_NEW*mid_angle
+
+    mid_servo = map_range(smooth_state["mid"], FINGER_BENT, FINGER_STRAIGHT, MIDDLE_SERVO_MAX, MIDDLE_SERVO_MIN)
+    mid_servo = clampi(mid_servo, MIDDLE_SERVO_MIN, MIDDLE_SERVO_MAX)
+
+    # ===== Pinky (17-18-19) =====
+    pky_angle = angle_3pts_3d(
+        (lm[17].x, lm[17].y, lm[17].z),
+        (lm[18].x, lm[18].y, lm[18].z),
+        (lm[19].x, lm[19].y, lm[19].z),
+    )
+    if smooth_state["pky"] is None:
+        smooth_state["pky"] = pky_angle
+    else:
+        smooth_state["pky"] = SMOOTH_OLD*smooth_state["pky"] + SMOOTH_NEW*pky_angle
+
+    pky_servo = map_range(smooth_state["pky"], FINGER_BENT, FINGER_STRAIGHT, PINKY_SERVO_MAX, PINKY_SERVO_MIN)
+    pky_servo = clampi(pky_servo, PINKY_SERVO_MIN, PINKY_SERVO_MAX)
+
+    # ===== Thumb (pinch + gate) =====
+    palm = palm_center(lm)
+    d_thumb = dist3_norm_point_to_xyz(lm[4], palm)
+    pinch = dist2_norm(lm[4], lm[8])
+
+    thumb_active = (pinch <= PINCH_ACTIVE_TH) or (d_thumb >= THUMB_EXT_TH)
+
+    if smooth_state["pinch"] is None:
+        smooth_state["pinch"] = pinch
+
+    if thumb_active:
+        smooth_state["pinch"] = PINCH_SMOOTH_OLD*smooth_state["pinch"] + PINCH_SMOOTH_NEW*pinch
+        thb_servo = map_range(smooth_state["pinch"], PINCH_CLOSE, PINCH_OPEN, THUMB_SERVO_MAX, THUMB_SERVO_MIN)
+        thb_servo = clampi(thb_servo, THUMB_SERVO_MIN, THUMB_SERVO_MAX)
+    else:
+        thb_servo = THUMB_SERVO_MIN
+
+    debug = {
+        "idx_ang": smooth_state["idx"],
+        "mid_ang": smooth_state["mid"],
+        "pky_ang": smooth_state["pky"],
+        "pinch": smooth_state["pinch"],
+        "thumb_active": thumb_active
+    }
+    return idx_servo, thb_servo, mid_servo, pky_servo, debug
+
+# ================== OPEN 2 CAM ==================
+cap_lap = cv2.VideoCapture(IDX_LAP, cv2.CAP_DSHOW)
+cap_ip  = cv2.VideoCapture(IDX_IP,  cv2.CAP_DSHOW)
+
+for cap in (cap_lap, cap_ip):
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+# ================== STATE ==================
+# last sent
+idx_last = thb_last = mid_last = pky_last = 0
+
+# servo smooth state (angles & pinch)
+smooth_state_ip  = {"idx": None, "mid": None, "pky": None, "pinch": None}
+smooth_state_lap = {"idx": None, "mid": None, "pky": None, "pinch": None}
+
+# landmark EMA filters
+ema_ip  = EMA21(alpha=LM_ALPHA_IP)
+ema_lap = EMA21(alpha=LM_ALPHA_LAP)
+
+# iPhone priority / fallback counter
+ip_lost_count = 0
+
+print("READY: 2 CAM (LAP=0, IP=1) | Control priority: iPhone")
+print("Serial format: index,thumb,middle,pinky")
+
+while True:
+    okL, frameL = cap_lap.read()
+    okI, frameI = cap_ip.read()
+
+    if not okL and not okI:
+        break
+
+    # ===== Process IPHONE first (priority) =====
+    chosen = None
+    chosen_tag = ""
+    chosen_debug = None
+    show_frame_main = None
+
+    if okI:
+        fI = cv2.flip(frameI, 1)
+        rgbI = cv2.cvtColor(fI, cv2.COLOR_BGR2RGB)
+        resI = hands_ip.process(rgbI)
+        handI = choose_hand(resI)
+
+        if handI is not None:
+            # landmark EMA in normalized coords (21,3)
+            ptsI = [(p.x, p.y, p.z) for p in handI.landmark]
+            ptsIf = ema_ip.update(ptsI)
+
+            # write filtered points back into a "fake" landmark list for compute
+            # (use a simple object with x,y,z)
+            class P: pass
+            lm_f = []
+            for x,y,z in ptsIf:
+                p = P(); p.x=float(x); p.y=float(y); p.z=float(z)
+                lm_f.append(p)
+
+            chosen = lm_f
+            chosen_tag = "IPHONE"
+            ip_lost_count = 0
+
+            # draw ORIGINAL skeleton for display (optional)
+            mp_draw.draw_landmarks(fI, handI, mp_hands.HAND_CONNECTIONS)
+
+            # compute servos using FILTERED landmarks
+            idx_servo, thb_servo, mid_servo, pky_servo, chosen_debug = compute_servos_from_landmarks(chosen, smooth_state_ip)
+
+            show_frame_main = fI
+
+        else:
+            ema_ip.reset()
+            smooth_state_ip = {"idx": None, "mid": None, "pky": None, "pinch": None}
+            ip_lost_count += 1
+            show_frame_main = fI
+
+    # ===== Fallback to LAP if iPhone lost for a while =====
+    if chosen is None and okL and ip_lost_count >= FALLBACK_FRAMES:
+        fL = cv2.flip(frameL, 1)
+        rgbL = cv2.cvtColor(fL, cv2.COLOR_BGR2RGB)
+        resL = hands_lap.process(rgbL)
+        handL = choose_hand(resL)
+
+        if handL is not None:
+            ptsL = [(p.x, p.y, p.z) for p in handL.landmark]
+            ptsLf = ema_lap.update(ptsL)
+
+            class P: pass
+            lm_f = []
+            for x,y,z in ptsLf:
+                p = P(); p.x=float(x); p.y=float(y); p.z=float(z)
+                lm_f.append(p)
+
+            chosen = lm_f
+            chosen_tag = "LAP"
+            chosen_debug = None
+
+            mp_draw.draw_landmarks(fL, handL, mp_hands.HAND_CONNECTIONS)
+            idx_servo, thb_servo, mid_servo, pky_servo, chosen_debug = compute_servos_from_landmarks(chosen, smooth_state_lap)
+
+            show_frame_main = fL
+        else:
+            ema_lap.reset()
+            smooth_state_lap = {"idx": None, "mid": None, "pky": None, "pinch": None}
+            show_frame_main = fL
+
+    # ===== Display both cams (with skeleton if detected) =====
+    if okL:
+        fL_show = cv2.flip(frameL, 1)
+        rgb = cv2.cvtColor(fL_show, cv2.COLOR_BGR2RGB)
+        res = hands_lap.process(rgb)
+        h = choose_hand(res)
+        if h is not None:
+            mp_draw.draw_landmarks(fL_show, h, mp_hands.HAND_CONNECTIONS)
+        cv2.putText(fL_show, "LAP (idx=0)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+        cv2.imshow("LAP CAM", fL_show)
+
+    if okI:
+        fI_show = cv2.flip(frameI, 1)
+        rgb = cv2.cvtColor(fI_show, cv2.COLOR_BGR2RGB)
+        res = hands_ip.process(rgb)
+        h = choose_hand(res)
+        if h is not None:
+            mp_draw.draw_landmarks(fI_show, h, mp_hands.HAND_CONNECTIONS)
+        cv2.putText(fI_show, "IPHONE (idx=1)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+        cv2.imshow("IPHONE CAM", fI_show)
+
+    # ===== If we have a chosen control hand -> apply anti-jitter before sending =====
+    if chosen is not None:
+        # rate limit final servo steps
+        idx_servo = int(rate_limit(idx_last, idx_servo, MAX_STEP_PER_FRAME))
+        thb_servo = int(rate_limit(thb_last, thb_servo, MAX_STEP_PER_FRAME))
+        mid_servo = int(rate_limit(mid_last, mid_servo, MAX_STEP_PER_FRAME))
+        pky_servo = int(rate_limit(pky_last, pky_servo, MAX_STEP_PER_FRAME))
+
+        send = (abs(idx_servo - idx_last) >= DEADBAND or
+                abs(thb_servo - thb_last) >= DEADBAND or
+                abs(mid_servo - mid_last) >= DEADBAND or
+                abs(pky_servo - pky_last) >= DEADBAND)
+
+        if send:
+            ser.write(f"{idx_servo},{thb_servo},{mid_servo},{pky_servo}\n".encode())
+            idx_last, thb_last, mid_last, pky_last = idx_servo, thb_servo, mid_servo, pky_servo
+
+        # HUD on main chosen camera if available
+        if show_frame_main is not None and chosen_debug is not None:
+            cv2.putText(show_frame_main, f"CTRL={chosen_tag}", (10, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
+            cv2.putText(show_frame_main, f"IDX={chosen_debug['idx_ang']:.1f}->{idx_servo}", (10, 110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+            cv2.putText(show_frame_main, f"MID={chosen_debug['mid_ang']:.1f}->{mid_servo}", (10, 145),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,255), 2)
+            cv2.putText(show_frame_main, f"PKY={chosen_debug['pky_ang']:.1f}->{pky_servo}", (10, 180),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,200,0), 2)
+            cv2.putText(show_frame_main, f"Pinch={chosen_debug['pinch']:.3f} THB={thb_servo} Active={chosen_debug['thumb_active']}",
+                        (10, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            cv2.imshow("CONTROL VIEW", show_frame_main)
+
+    else:
+        # no hand -> optional: you can send rest pose once
+        pass
+
+    if (cv2.waitKey(1) & 0xFF) == 27:
+        break
+
+cap_lap.release()
+cap_ip.release()
+ser.close()
+cv2.destroyAllWindows()
+hands_ip.close()
+hands_lap.close()   

@@ -1,0 +1,2473 @@
+# -*- coding: utf-8 -*-
+"""
+DATN WEB DASHBOARD LAN - V20 V17 SHIFTED CAMERA
+============================================================
+Dashboard web LAN cho de tai:
+BAN TAY ROBOT + PYTHON YOLO + UNITY + ESP32/FSR
+
+Muc tieu V5:
+- Gon hon V3 Industrial.
+- Nhin chuyen nghiep hon V1/V2.
+- Hop de demo hoi dong: Python chi hien camera, web hien thong so.
+- Khong can Flask, khong can cai thu vien ngoai.
+- Dien thoai/laptop cung Wi-Fi mo duoc link LAN.
+- Co them PUBLIC MODE bang ngrok de gui link cho nguoi khac ngoai mang.
+
+Chay test doc lap:
+    python datn_web_dashboard_public.py
+
+Chay public cho ban khac mang:
+    python datn_web_dashboard_public.py --public
+
+Mo tren laptop:
+    http://127.0.0.1:5000
+
+Mo tren dien thoai cung Wi-Fi:
+    http://LAPTOP-HAO:5000
+    hoac http://IP_LAPTOP:5000
+
+Tich hop vao code Python chinh:
+    from datn_web_dashboard_v7_real_camera import start_web_dashboard, update_dashboard
+
+    start_web_dashboard(port=5000, public=True)   # public=True neu muon tao link ngrok
+
+    update_dashboard(
+        object_label="red_chili",
+        object_name="Red Chili",
+        mass_g=80,
+        grip_state="FREE_TRACKING_AUTO",
+        palm_sensor=True,
+        palm_test=False,
+        loadcell_n=0.78,
+        required_min_n=3.67,
+        required_max_n=6.67,
+        target_total_n=5.17,
+        fps=22.6,
+        esp32_status="Connected",
+        unity_status="UDP 5052/5053 OK",
+        serial_note="DEMO MODE",
+        mode="AUTO",
+        auto_state="RUNNING",
+        fsr_index_n=1.13,
+        fsr_middle_n=1.49,
+        fsr_ring_n=0.85,
+        fsr_pinky_n=0.96,
+    )
+============================================================
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import random
+import shutil
+import socket
+import subprocess
+import urllib.request
+import webbrowser
+import threading
+import time
+from copy import deepcopy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, Optional
+
+
+# ===================== DATN HEADER LOGO PATHS =====================
+# Logo được serve trực tiếp bởi HTTP server nội bộ.
+# Giữ đường dẫn tuyệt đối để không phụ thuộc thư mục chạy Python.
+SCHOOL_LOGO_PATH = r"D:\DATN\logotruong.png"
+FACULTY_LOGO_PATH = r"D:\DATN\logokhoa.png"
+
+
+_STATUS_LOCK = threading.Lock()
+
+_STATUS: Dict[str, Any] = {
+    "object_label": "none",
+    "object_name": "None",
+    "mass_g": 0,
+    "grip_state": "FREE_TRACKING_AUTO",
+    "palm_sensor": False,
+    "palm_test": False,
+    "loadcell_n": 0.0,
+    "required_min_n": 0.0,
+    "required_max_n": 0.0,
+    "target_total_n": 0.0,
+    "fps": 0.0,
+    "esp32_status": "Unknown",
+    "unity_status": "Unknown",
+    "serial_note": "",
+    "mode": "AUTO",
+    "auto_state": "READY",
+    "camera_status": "Active",
+    "yolo_status": "Ready",
+    "hand_status": "Tracking",
+    "fsr_thumb_n": 0.0,
+    "fsr_index_n": 0.0,
+    "fsr_middle_n": 0.0,
+    "fsr_ring_n": 0.0,
+    "fsr_pinky_n": 0.0,
+
+    "target_index_n": 0.0,
+    "target_middle_n": 0.0,
+    "target_ring_n": 0.0,
+    "target_pinky_n": 0.0,
+    "touch_target_index_n": 0.0,
+    "touch_target_middle_n": 0.0,
+    "touch_target_ring_n": 0.0,
+    "touch_target_pinky_n": 0.0,
+    "touch_target_active_count": 0,
+    "auto_thumb_pct": 0.0,
+    "auto_index_pct": 0.0,
+    "auto_middle_pct": 0.0,
+    "auto_ring_pct": 0.0,
+    "auto_pinky_pct": 0.0,
+    "manual_thumb_pct": 0.0,
+    "manual_index_pct": 0.0,
+    "manual_middle_pct": 0.0,
+    "manual_ring_pct": 0.0,
+    "manual_pinky_pct": 0.0,
+    "hand_thumb_pct": 0.0,
+    "hand_index_pct": 0.0,
+    "hand_middle_pct": 0.0,
+    "hand_ring_pct": 0.0,
+    "hand_pinky_pct": 0.0,
+    "unity_thumb_pct": 0.0,
+    "unity_index_pct": 0.0,
+    "unity_middle_pct": 0.0,
+    "unity_ring_pct": 0.0,
+    "unity_pinky_pct": 0.0,
+
+    # V35: servo pulse test/readback for Page 2.
+    "servo_min_us": 400,
+    "servo_max_us": 2500,
+    "servo_pulse_override_enabled": False,
+    "servo_pulse_gate_open": False,
+    "servo_thumb_pct": 0.0,
+    "servo_index_pct": 0.0,
+    "servo_middle_pct": 0.0,
+    "servo_ring_pct": 0.0,
+    "servo_pinky_pct": 0.0,
+    "servo_thumb_us": 0,
+    "servo_index_us": 0,
+    "servo_middle_us": 0,
+    "servo_ring_us": 0,
+    "servo_pinky_us": 0,
+    "last_update": time.time(),
+}
+
+
+_CONTROL_LOCK = threading.Lock()
+_CONTROL: Dict[str, Any] = {
+    "mode": "AUTO",
+    "manual_thumb_pct": 0.0,
+    "manual_index_pct": 0.0,
+    "manual_middle_pct": 0.0,
+    "manual_ring_pct": 0.0,
+    "manual_pinky_pct": 0.0,
+    "hand_thumb_pct": 0.0,
+    "hand_index_pct": 0.0,
+    "hand_middle_pct": 0.0,
+    "hand_ring_pct": 0.0,
+    "hand_pinky_pct": 0.0,
+    "unity_thumb_pct": 0.0,
+    "unity_index_pct": 0.0,
+    "unity_middle_pct": 0.0,
+    "unity_ring_pct": 0.0,
+    "unity_pinky_pct": 0.0,
+    "palm_test_toggle_seq": 0,
+
+    # V35: direct servo microsecond input from Page 2.
+    "servo_pulse_override_enabled": False,
+    "servo_pulse_thumb_us": 0,
+    "servo_pulse_index_us": 0,
+    "servo_pulse_middle_us": 0,
+    "servo_pulse_ring_us": 0,
+    "servo_pulse_pinky_us": 0,
+    "servo_pulse_thumb_seq": 0,
+    "servo_pulse_index_seq": 0,
+    "servo_pulse_middle_seq": 0,
+    "servo_pulse_ring_seq": 0,
+    "servo_pulse_pinky_seq": 0,
+    "last_update": 0.0,
+}
+
+
+def update_web_control(**kwargs: Any) -> None:
+    """Cap nhat control tu web Page 1: AUTO/MANU + 5 manual sliders."""
+    with _CONTROL_LOCK:
+        for key, value in kwargs.items():
+            if key == "mode":
+                mode = str(value).upper().strip()
+                if mode in ("AUTO", "MANU"):
+                    _CONTROL["mode"] = mode
+            elif key == "palm_test_toggle":
+                try:
+                    if bool(value):
+                        _CONTROL["palm_test_toggle_seq"] = int(_CONTROL.get("palm_test_toggle_seq", 0)) + 1
+                except Exception:
+                    _CONTROL["palm_test_toggle_seq"] = int(_CONTROL.get("palm_test_toggle_seq", 0)) + 1
+            elif key == "servo_pulse_override_enabled":
+                _CONTROL["servo_pulse_override_enabled"] = bool(value)
+                if not bool(value):
+                    # Turning A/OFF clears all pending direct pulse commands.
+                    for _f in ("thumb", "index", "middle", "ring", "pinky"):
+                        _CONTROL[f"servo_pulse_{_f}_us"] = 0
+            elif key.startswith("servo_pulse_") and key.endswith("_us"):
+                # Accept only 400..2500 us, same hard limit as ESP32 attach/clamp range.
+                try:
+                    us = int(float(value))
+                    us = max(400, min(2500, us))
+                    _CONTROL[key] = us
+                    # Increase per-finger sequence so Python knows this is a new apply command.
+                    _f = key[len("servo_pulse_"):-len("_us")]
+                    seq_key = f"servo_pulse_{_f}_seq"
+                    if seq_key in _CONTROL:
+                        _CONTROL[seq_key] = int(_CONTROL.get(seq_key, 0) or 0) + 1
+                except Exception:
+                    pass
+            elif key.startswith("manual_") and key.endswith("_pct"):
+                try:
+                    _CONTROL[key] = max(0.0, min(100.0, float(value)))
+                except Exception:
+                    pass
+        _CONTROL["last_update"] = time.time()
+
+
+def get_web_control_snapshot() -> Dict[str, Any]:
+    """Python main loop goi ham nay de lay lenh MANU tu web."""
+    with _CONTROL_LOCK:
+        return deepcopy(_CONTROL)
+
+
+_CAMERA_LOCK = threading.Lock()
+_CAMERA_JPEG = {"main": None, "phone": None}
+_CAMERA_TS = {"main": 0.0, "phone": 0.0}
+
+
+def update_camera_jpeg(name: str, jpeg_bytes: bytes) -> None:
+    """
+    Cap nhat frame camera dang JPEG bytes cho web.
+    name: "main" hoac "phone".
+    """
+    if name not in _CAMERA_JPEG:
+        return
+    if not jpeg_bytes:
+        return
+    with _CAMERA_LOCK:
+        _CAMERA_JPEG[name] = bytes(jpeg_bytes)
+        _CAMERA_TS[name] = time.time()
+
+
+def update_camera_frame(name: str, frame_bgr, quality: int = 70, max_width: int = 960) -> None:
+    """
+    Cap nhat camera tu frame OpenCV BGR.
+    Goi ham nay trong main loop sau khi da ve YOLO box/landmark len frame.
+
+    Vi du:
+        update_camera_frame("main", frame_main_display)
+        update_camera_frame("phone", frame_phone_display)
+    """
+    if name not in _CAMERA_JPEG:
+        return
+    if frame_bgr is None:
+        return
+
+    try:
+        import cv2
+    except Exception:
+        return
+
+    try:
+        frame = frame_bgr
+        h, w = frame.shape[:2]
+        if max_width and w > max_width:
+            scale = max_width / float(w)
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+        if ok:
+            update_camera_jpeg(name, buf.tobytes())
+    except Exception:
+        return
+
+
+def _placeholder_svg(name: str) -> bytes:
+    title = "MAIN CAMERA" if name == "main" else "PHONE CAMERA"
+    svg = f"""<svg xmlns='http://www.w3.org/2000/svg' width='960' height='540' viewBox='0 0 960 540'>
+<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#07111f'/><stop offset='1' stop-color='#0f1b31'/></linearGradient></defs>
+<rect width='960' height='540' fill='url(#g)'/>
+<rect x='24' y='24' width='912' height='492' rx='28' fill='#050914' stroke='#1f3b55' stroke-width='2'/>
+<text x='50%' y='47%' text-anchor='middle' fill='#22d3ee' font-family='Arial' font-size='36' font-weight='700'>{title}</text>
+<text x='50%' y='56%' text-anchor='middle' fill='#91a4be' font-family='Arial' font-size='20'>Waiting for Python frame...</text>
+</svg>"""
+    return svg.encode("utf-8")
+
+
+def get_camera_response(name: str):
+    """Tra ve tuple (data, content_type) cho endpoint camera."""
+    if name not in _CAMERA_JPEG:
+        return _placeholder_svg(name), "image/svg+xml; charset=utf-8"
+    with _CAMERA_LOCK:
+        data = _CAMERA_JPEG.get(name)
+    if data is None:
+        return _placeholder_svg(name), "image/svg+xml; charset=utf-8"
+    return data, "image/jpeg"
+
+
+# ===================== DATN SCHOOL / FACULTY LOGO RESPONSE =====================
+def _logo_fallback_svg(label: str) -> bytes:
+    """Logo dự phòng nếu file ảnh không tồn tại hoặc không đọc được."""
+    safe_label = str(label or "LOGO")[:18]
+    svg = f"""<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'>
+<rect width='260' height='260' rx='28' fill='#ffffff'/>
+<rect x='12' y='12' width='236' height='236' rx='24' fill='#ffffff' stroke='#1e3a8a' stroke-width='6'/>
+<circle cx='130' cy='105' r='54' fill='none' stroke='#1e3a8a' stroke-width='9'/>
+<path d='M78 140 C100 168 160 168 182 140' fill='none' stroke='#ef4444' stroke-width='14' stroke-linecap='round'/>
+<text x='130' y='212' text-anchor='middle' fill='#1e3a8a' font-family='Arial' font-size='30' font-weight='900'>{safe_label}</text>
+</svg>"""
+    return svg.encode("utf-8")
+
+
+def _read_local_image_response(path: str, fallback_label: str):
+    """Đọc ảnh local và trả về (bytes, content_type)."""
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".svg": "image/svg+xml; charset=utf-8",
+    }
+
+    try:
+        p = os.path.expandvars(os.path.expanduser(str(path or "").strip().strip('"')))
+        if p and os.path.isfile(p):
+            ext = os.path.splitext(p)[1].lower()
+            content_type = mime_map.get(ext, "application/octet-stream")
+            with open(p, "rb") as f:
+                return f.read(), content_type
+    except Exception:
+        pass
+
+    return _logo_fallback_svg(fallback_label), "image/svg+xml; charset=utf-8"
+
+
+def get_logo_response(kind: str):
+    """Route ảnh logo header: /api/logo/school và /api/logo/faculty."""
+    kind = str(kind or "").strip().lower()
+    if kind == "faculty":
+        return _read_local_image_response(FACULTY_LOGO_PATH, "FEEE")
+    return _read_local_image_response(SCHOOL_LOGO_PATH, "HCMUTE")
+
+_SERVER: Optional[ThreadingHTTPServer] = None
+_SERVER_THREAD: Optional[threading.Thread] = None
+
+_NGROK_PROCESS: Optional[subprocess.Popen] = None
+_NGROK_PUBLIC_URL: Optional[str] = None
+
+
+def print_public_tunnel_help(port: int = 5000) -> None:
+    """
+    In huong dan public dashboard ra Internet bang ngrok.
+    Dung khi ban muon chay o nha va gui link cho ban o truong xem realtime.
+    """
+    print("=" * 86)
+    print("[PUBLIC WEB] Cach tao link NGOAI MANG cho dashboard:")
+    print(f"[PUBLIC WEB] 1) Chay dashboard local truoc: http://127.0.0.1:{port}")
+    print("[PUBLIC WEB] 2) Tai ngrok.exe, dang nhap va cau hinh authtoken 1 lan:")
+    print("[PUBLIC WEB]    ngrok config add-authtoken TOKEN_CUA_BAN")
+    print("[PUBLIC WEB] 3) Chay lenh:")
+    print(f"[PUBLIC WEB]    ngrok http {port}")
+    print("[PUBLIC WEB] 4) Copy link https://...ngrok-free.app gui cho ban o truong.")
+    print("[PUBLIC WEB] Luu y: may ban phai dang mo code Python + ngrok thi link moi song.")
+    print("=" * 86)
+
+
+def _find_ngrok_exe(ngrok_path: Optional[str] = None) -> Optional[str]:
+    """
+    Tim ngrok.exe de tu tao public link.
+    Uu tien:
+    - tham so ngrok_path
+    - bien moi truong NGROK_PATH
+    - file ngrok.exe nam cung thu muc voi file .py nay
+    - ngrok trong PATH Windows
+    """
+    candidates = []
+
+    if ngrok_path:
+        candidates.append(ngrok_path)
+
+    env_path = os.environ.get("NGROK_PATH", "").strip()
+    if env_path:
+        candidates.append(env_path)
+
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(os.path.join(here, "ngrok.exe"))
+        candidates.append(os.path.join(here, "ngrok"))
+    except Exception:
+        pass
+
+    which_ngrok = shutil.which("ngrok") or shutil.which("ngrok.exe")
+    if which_ngrok:
+        candidates.append(which_ngrok)
+
+    # Thu them vai vi tri Windows hay dung
+    candidates.extend([
+        r"D:\ngrok\ngrok.exe",
+        r"C:\ngrok\ngrok.exe",
+        os.path.join(os.path.expanduser("~"), "Downloads", "ngrok.exe"),
+        os.path.join(os.path.expanduser("~"), "Desktop", "ngrok.exe"),
+    ])
+
+    for item in candidates:
+        if not item:
+            continue
+        item = os.path.expandvars(os.path.expanduser(str(item).strip().strip('"')))
+        if os.path.isfile(item):
+            return item
+
+    return None
+
+
+def _read_ngrok_public_url() -> Optional[str]:
+    """
+    Doc URL public tu local API cua ngrok: http://127.0.0.1:4040/api/tunnels
+    Tra ve link https neu co.
+    """
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=0.8) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        data = json.loads(raw)
+        tunnels = data.get("tunnels", [])
+        public_urls = []
+        for t in tunnels:
+            url = str(t.get("public_url", "")).strip()
+            if url:
+                public_urls.append(url)
+
+        # Uu tien HTTPS de gui cho nguoi khac
+        for url in public_urls:
+            if url.startswith("https://"):
+                return url
+        return public_urls[0] if public_urls else None
+    except Exception:
+        return None
+
+
+def start_public_tunnel_ngrok(
+    port: int = 5000,
+    ngrok_path: Optional[str] = None,
+    print_link: bool = True,
+    wait_sec: float = 8.0,
+) -> Optional[str]:
+    """
+    Tu bat ngrok va lay public URL.
+    Cach dung:
+        start_web_dashboard(port=5000, public=True)
+
+    Dieu kien:
+    - May da co ngrok.exe
+    - Da chay: ngrok config add-authtoken TOKEN_CUA_BAN
+    """
+    global _NGROK_PROCESS, _NGROK_PUBLIC_URL
+
+    # Neu ngrok da co tunnel dang chay o may, doc lai URL luon.
+    old_url = _read_ngrok_public_url()
+    if old_url:
+        _NGROK_PUBLIC_URL = old_url
+        if print_link:
+            print("=" * 86)
+            print(f"[PUBLIC WEB] Public URL dang chay: {_NGROK_PUBLIC_URL}")
+            print("[PUBLIC WEB] Gui link nay cho ban o ngoai mang de xem realtime.")
+            print("=" * 86)
+        return _NGROK_PUBLIC_URL
+
+    exe = _find_ngrok_exe(ngrok_path)
+    if not exe:
+        if print_link:
+            print("[PUBLIC WEB] Chua tim thay ngrok.exe nen chua tu tao link public duoc.")
+            print_public_tunnel_help(port)
+        return None
+
+    try:
+        _NGROK_PROCESS = subprocess.Popen(
+            [exe, "http", str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception as e:
+        if print_link:
+            print(f"[PUBLIC WEB] Khong mo duoc ngrok: {e}")
+            print_public_tunnel_help(port)
+        return None
+
+    t0 = time.time()
+    while time.time() - t0 < wait_sec:
+        url = _read_ngrok_public_url()
+        if url:
+            _NGROK_PUBLIC_URL = url
+            if print_link:
+                print("=" * 86)
+                print("[PUBLIC WEB] Da tao link NGOAI MANG thanh cong.")
+                print(f"[PUBLIC WEB] Gui link nay cho ban o truong: {_NGROK_PUBLIC_URL}")
+                print("[PUBLIC WEB] Luu y: khong tat terminal Python / khong tat ngrok.")
+                print("=" * 86)
+            return _NGROK_PUBLIC_URL
+        time.sleep(0.35)
+
+    if print_link:
+        print("[PUBLIC WEB] Da mo ngrok nhung chua doc duoc public URL.")
+        print("[PUBLIC WEB] Co the ban chua add authtoken hoac ngrok dang loi.")
+        print_public_tunnel_help(port)
+    return None
+
+
+def get_public_url() -> Optional[str]:
+    """Lay public URL hien tai neu ngrok dang chay."""
+    global _NGROK_PUBLIC_URL
+    url = _read_ngrok_public_url()
+    if url:
+        _NGROK_PUBLIC_URL = url
+    return _NGROK_PUBLIC_URL
+
+
+
+def get_local_ip() -> str:
+    """
+    Lay IP LAN that cua laptop de dien thoai cung Wi-Fi truy cap.
+    Uu tien IP 192.168.x.x / 10.x.x.x / 172.16-31.x.x.
+    Bo qua cac IP la nhu 127.x.x.x, 169.254.x.x, 0.x.x.x va adapter ao.
+    """
+    candidates = []
+
+    # Cach 1: lay IP tu hostname
+    try:
+        host_name = socket.gethostname()
+        infos = socket.getaddrinfo(host_name, None, family=socket.AF_INET)
+        for item in infos:
+            ip = item[4][0]
+            candidates.append(ip)
+    except Exception:
+        pass
+
+    # Cach 2: mo UDP socket de he dieu hanh chon route mac dinh
+    # Khong gui goi tin that ra internet, chi de lay local address.
+    for target in [("8.8.8.8", 80), ("1.1.1.1", 80), ("192.168.1.1", 80)]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.2)
+            s.connect(target)
+            candidates.append(s.getsockname()[0])
+            s.close()
+        except Exception:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def is_good_lan_ip(ip: str) -> bool:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return False
+        try:
+            a, b, c, d = [int(x) for x in parts]
+        except Exception:
+            return False
+
+        # Bo qua local/loi/adapter ao
+        if a in (0, 127):
+            return False
+        if a == 169 and b == 254:
+            return False
+        if d == 0 or d == 255:
+            return False
+
+        # Uu tien LAN private
+        if a == 192 and b == 168:
+            return True
+        if a == 10:
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+
+        return False
+
+    # Bo trung lap nhung giu thu tu
+    unique = []
+    for ip in candidates:
+        if ip not in unique:
+            unique.append(ip)
+
+    for ip in unique:
+        if is_good_lan_ip(ip):
+            return ip
+
+    # Neu khong tim duoc, tra ve hostname de nguoi dung thu http://LAPTOP-HAO:5000
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "127.0.0.1"
+
+
+def get_access_links(port: int = 5000) -> dict:
+    """
+    Tra ve cac link de hien thi ra terminal:
+    - local: mo tren chinh laptop
+    - hostname: mo bang ten may, vi du http://LAPTOP-HAO:5000
+    - lan: mo bang IP LAN, chac an nhat neu dien thoai cung Wi-Fi
+    """
+    try:
+        host_name = socket.gethostname()
+    except Exception:
+        host_name = "LAPTOP-HAO"
+
+    lan_ip = get_local_ip()
+
+    return {
+        "local": f"http://127.0.0.1:{port}",
+        "hostname": f"http://{host_name}:{port}",
+        "hostname_local": f"http://{host_name}.local:{port}",
+        "lan": f"http://{lan_ip}:{port}",
+        "lan_ip": lan_ip,
+        "host_name": host_name,
+    }
+
+
+def update_dashboard(**kwargs: Any) -> None:
+    """
+    Cap nhat du lieu hien thi dashboard.
+    Goi ham nay trong main loop cua code Python chinh.
+    """
+    with _STATUS_LOCK:
+        for key, value in kwargs.items():
+            _STATUS[key] = value
+        _STATUS["last_update"] = time.time()
+
+
+def get_dashboard_snapshot() -> Dict[str, Any]:
+    with _STATUS_LOCK:
+        return deepcopy(_STATUS)
+
+
+HTML_PAGE = r"""<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <title>DATN - DIGITAL TWIN FOR HAND ROBOT</title>
+  <style>
+    :root{--bg:#050914;--bg2:#07111f;--line:rgba(148,163,184,.18);--text:#edf5ff;--muted:#91a4be;--muted2:#61738d;--cyan:#22d3ee;--blue:#60a5fa;--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--orange:#fb923c;--violet:#8b5cf6;--shadow:0 20px 64px rgba(0,0,0,.36)}
+    *{box-sizing:border-box} html,body{margin:0;min-height:100%;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 12% -8%,rgba(34,211,238,.16),transparent 30%),radial-gradient(circle at 90% 0%,rgba(96,165,250,.12),transparent 34%),linear-gradient(135deg,var(--bg),var(--bg2));overflow:hidden}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(148,163,184,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(148,163,184,.035) 1px,transparent 1px);background-size:34px 34px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.82),transparent 92%)}
+    .app{position:fixed;left:8px;top:8px;bottom:8px;z-index:1;width:min(800px,calc(100vw - 16px));margin:0;padding:0 8px 14px 0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:rgba(34,211,238,.55) rgba(15,23,42,.45)}
+    .app::-webkit-scrollbar{width:8px}.app::-webkit-scrollbar-track{background:rgba(15,23,42,.45);border-radius:99px}.app::-webkit-scrollbar-thumb{background:rgba(34,211,238,.55);border-radius:99px}
+    .topbar{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;min-height:50px;padding:6px 9px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(15,23,42,.82),rgba(11,19,34,.62));box-shadow:var(--shadow);backdrop-filter:blur(18px)}
+    .logo{width:32px;height:32px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,var(--cyan),var(--blue) 55%,var(--violet));color:#02111c;font-size:13px;font-weight:1000;letter-spacing:-.06em;box-shadow:0 0 26px rgba(34,211,238,.24)}
+    .title h1{margin:0;font-size:clamp(15px,1.7vw,20px);line-height:1.03;letter-spacing:-.055em;font-weight:1000}.title p{margin:4px 0 0;color:var(--muted);font-size:10px}
+    .top-pills{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:7px}.pill{min-height:24px;display:inline-flex;align-items:center;gap:8px;padding:4px 7px;border-radius:999px;border:1px solid var(--line);background:rgba(2,6,23,.38);color:#d8e6f7;font-size:10px;font-weight:950;white-space:nowrap}.live-dot{width:9px;height:9px;border-radius:999px;background:var(--green);box-shadow:0 0 18px var(--green)}
+    .tabs{margin-top:7px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.nav-status{display:inline-flex;align-items:center;gap:6px;margin-left:6px;flex-wrap:wrap}.status-chip{min-height:32px;display:inline-flex;align-items:center;gap:7px;padding:6px 9px;border-radius:999px;border:1px solid rgba(148,163,184,.18);background:rgba(2,6,23,.38);font-size:10px;font-weight:1000;color:#d8e6f7;white-space:nowrap}.status-chip b{color:#91a4be;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.tabbtn{border:1px solid rgba(34,211,238,.28);background:rgba(2,6,23,.38);color:#d8e6f7;border-radius:999px;min-height:30px;padding:8px 14px;font-size:11px;font-weight:1000;text-transform:uppercase;letter-spacing:.07em;cursor:pointer}.tabbtn.active{background:rgba(34,211,238,.14);border-color:rgba(34,211,238,.55);color:#67e8f9;box-shadow:0 0 24px rgba(34,211,238,.10)}
+    .page{display:none;margin-top:7px}.page.active{display:block}.content-grid{display:grid;grid-template-columns:minmax(0,.98fr) minmax(0,.92fr);gap:10px;align-items:start}.left-stack,.right-stack{display:grid;gap:6px;min-width:0}.panel{border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(13,23,40,.84),rgba(13,23,40,.58));box-shadow:var(--shadow);overflow:hidden;backdrop-filter:blur(16px)}
+    .panel-head{min-height:30px;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:5px 8px;border-bottom:1px solid var(--line);background:rgba(2,6,23,.22)}.head-title b{display:block;color:#e6f4ff;font-size:9.5px;text-transform:uppercase;letter-spacing:.13em;font-weight:1000}.head-title span{display:block;margin-top:2px;color:var(--muted2);font-size:9px}
+    .badge{min-height:28px;display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;border-radius:999px;border:1px solid rgba(34,211,238,.28);background:rgba(34,211,238,.10);color:#67e8f9;font-size:10px;font-weight:1000;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}.badge.green{color:#86efac;background:rgba(34,197,94,.11);border-color:rgba(34,197,94,.28)}.badge.amber{color:#fcd34d;background:rgba(245,158,11,.11);border-color:rgba(245,158,11,.28)}.badge.red{color:#fca5a5;background:rgba(239,68,68,.11);border-color:rgba(239,68,68,.28)}
+    .object-body{padding:8px}.object-hero{position:relative;min-height:270px;padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:12px;background:radial-gradient(circle at 87% 18%,rgba(34,211,238,.14),transparent 27%),linear-gradient(135deg,rgba(16,28,49,.88),rgba(10,18,32,.62));overflow:hidden}.object-hero:before{content:"";position:absolute;right:24px;top:24px;width:104px;height:104px;border-radius:30px;transform:rotate(15deg);background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.16)}.object-hero:after{content:"";position:absolute;right:52px;top:54px;width:48px;height:48px;border-radius:16px;transform:rotate(22deg);background:linear-gradient(135deg,rgba(34,211,238,.22),rgba(139,92,246,.18))}
+    .eyebrow{color:var(--muted);font-size:10px;font-weight:1000;letter-spacing:.14em;text-transform:uppercase}.object-name{position:relative;z-index:1;max-width:72%;margin-top:7px;font-size:clamp(32px,4vw,48px);line-height:.90;letter-spacing:-.080em;font-weight:1000}.object-label{position:relative;z-index:1;margin-top:7px;color:var(--muted);font-size:12px;word-break:break-word}.summary-grid{position:absolute;left:8px;right:8px;bottom:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;z-index:1}.summary{min-height:38px;padding:8px;border-radius:12px;border:1px solid rgba(148,163,184,.15);background:rgba(2,6,23,.33)}.summary .k,.safety-card .k{color:var(--muted2);font-size:10px;font-weight:1000;text-transform:uppercase;letter-spacing:.12em}.summary .v,.safety-card .v{margin-top:6px;font-size:17px;line-height:1.0;font-weight:1000;letter-spacing:-.04em}
+    .force-body{padding:8px}.chart-box{height:178px;border:1px solid rgba(148,163,184,.15);border-radius:16px;background:rgba(2,6,23,.24);padding:10px}canvas{width:100%;height:100%;display:block}.legend{margin-top:5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:11px;font-weight:800}.line-key{display:inline-flex;align-items:center;gap:6px}.line-dot{width:18px;height:3px;border-radius:99px;background:var(--cyan)}.line-dot.index{background:var(--blue)}.line-dot.middle{background:var(--cyan)}.line-dot.ring{background:var(--green)}.line-dot.pinky{background:var(--orange)}
+    .safety-grid{padding:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px}.safety-card{min-height:56px;padding:8px;border-radius:12px;border:1px solid rgba(148,163,184,.15);background:rgba(2,6,23,.23)}
+    .finger-body,.control-body{padding:10px;display:grid;gap:11px}.finger,.control-row{display:grid;gap:4px}.finger-top,.control-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.finger-top b,.control-top b{font-size:12px;color:#e7f4ff}.finger-top span,.control-top span{color:var(--muted);font-size:12px;font-weight:1000}.bar{height:6px;border-radius:999px;border:1px solid rgba(148,163,184,.14);background:rgba(2,6,23,.38);overflow:hidden}.bar i{display:block;height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,var(--blue),var(--cyan),var(--green));box-shadow:0 0 22px rgba(34,211,238,.24);transition:width .18s ease}.bar i.warn{background:linear-gradient(90deg,var(--amber),var(--orange));box-shadow:0 0 22px rgba(251,146,60,.24)}
+    .force-metrics{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap;text-align:right}.closing-text{color:#fcd34d!important;font-weight:1000}.thumb-row .bar i{background:linear-gradient(90deg,var(--violet),var(--cyan));box-shadow:0 0 22px rgba(139,92,246,.24)}
+    .mode-row{padding:10px;display:flex;gap:10px;flex-wrap:wrap}.mode-btn{border:1px solid rgba(148,163,184,.18);background:rgba(2,6,23,.35);color:#dbeafe;border-radius:12px;min-height:42px;padding:10px 18px;font-size:13px;font-weight:1000;cursor:pointer}.mode-btn.active{border-color:rgba(34,211,238,.62);background:rgba(34,211,238,.14);color:#67e8f9}.mode-btn.manual.active{border-color:rgba(245,158,11,.62);background:rgba(245,158,11,.14);color:#fcd34d}
+    input[type=range]{width:100%;accent-color:#22d3ee;cursor:pointer}input[type=range]:disabled{opacity:.35;cursor:not-allowed;accent-color:#64748b}.manual-disabled-note{padding:0 10px 10px;color:#fcd34d;font-size:11px;font-weight:800;display:none}.manual-disabled-note.show{display:block}.sliderline{display:grid;grid-template-columns:72px 1fr 52px;gap:10px;align-items:center;color:#dbeafe;font-size:12px;font-weight:900}.sliderline span:last-child{text-align:right;color:#67e8f9}.metric-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:10px}.metric{border:1px solid rgba(148,163,184,.15);border-radius:12px;background:rgba(2,6,23,.24);padding:10px;min-height:72px}.metric .k{color:var(--muted2);font-size:10px;font-weight:1000;text-transform:uppercase;letter-spacing:.12em}.metric .v{font-size:22px;margin-top:8px;font-weight:1000}
+    .palm-mini{font-weight:1000}
+    .palm-mini.on{color:#86efac!important}
+    .palm-mini.off{color:#fcd34d!important}
+    .palm-mini.lock{color:#94a3b8!important}
+    .angle-error-list{padding:5px 8px 10px;display:grid;gap:6px}
+    .angle-row{display:grid;grid-template-columns:54px 1fr 54px;gap:5px;align-items:center;min-height:25px;border:1px solid rgba(148,163,184,.13);border-radius:12px;background:rgba(2,6,23,.22);padding:6px 8px}
+    .angle-row b{font-size:11px;color:#e7f4ff}
+    .angle-mid{font-size:9px;color:var(--muted);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .angle-err{font-size:12px;font-weight:1000;text-align:right;color:#67e8f9}
+
+    .green-t{color:#86efac!important}.cyan-t{color:#67e8f9!important}.amber-t{color:#fcd34d!important}.red-t{color:#fca5a5!important}.orange-t{color:#fdba74!important}
+    .camera-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .camera-grid.page1-cams{margin-top:7px}
+    .cam-panel{border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,rgba(13,23,40,.84),rgba(13,23,40,.58));box-shadow:var(--shadow);overflow:hidden;min-height:188px}
+    .cam-head{min-height:30px;display:flex;align-items:center;justify-content:space-between;padding:6px 9px;border-bottom:1px solid var(--line);background:rgba(2,6,23,.24)}
+    .cam-head b{font-size:10px;text-transform:uppercase;letter-spacing:.13em;color:#e6f4ff;font-weight:1000}
+    .cam-head span{font-size:10px;color:#67e8f9;border:1px solid rgba(34,211,238,.26);background:rgba(34,211,238,.08);border-radius:999px;padding:4px 7px;font-weight:1000}
+    .cam-view{height:170px;background:#020617;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+    .page2-cams .cam-view{height:142px}
+    .cam-view img{width:100%;height:100%;object-fit:contain;display:block}
+    .cam-view:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(rgba(34,211,238,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(34,211,238,.035) 1px,transparent 1px);background-size:24px 24px;opacity:.32}
+.footer{margin-top:7px;display:flex;justify-content:space-between;gap:12px;color:var(--muted2);font-size:11px;flex-wrap:wrap;padding:0 4px}
+    @media(max-width:900px){html,body{overflow:auto}.app{position:relative;left:auto;top:auto;bottom:auto;width:calc(100vw - 16px);margin-left:8px;padding:8px 0 18px;overflow:visible}.topbar{grid-template-columns:auto 1fr}.top-pills{grid-column:1/-1;justify-content:flex-start}.content-grid{grid-template-columns:1fr}.object-name{font-size:32px}.chart-box{height:165px}.metric-grid{grid-template-columns:1fr}}
+  
+    /* ===================== V20: GIU SIZE V17, CHI DICH LEN + BOT KHOANG TRONG ===================== */
+    .app{
+      top:2px!important;
+      left:4px!important;
+      bottom:auto!important;
+      width:min(800px,calc(100vw - 8px))!important;
+      padding:0 6px 6px 0!important;
+      overflow:visible!important;
+    }
+
+    .topbar{
+      min-height:50px!important;
+      padding:5px 9px!important;
+      border-radius:14px!important;
+      grid-template-columns:auto minmax(300px,1fr) auto!important;
+    }
+
+    .title h1{
+      white-space:nowrap!important;
+      overflow:hidden!important;
+      text-overflow:ellipsis!important;
+      font-size:18px!important;
+      line-height:1!important;
+    }
+
+    .title p{
+      font-size:9px!important;
+      margin-top:2px!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+      text-overflow:ellipsis!important;
+    }
+
+    .top-pills{
+      flex-wrap:nowrap!important;
+      gap:5px!important;
+    }
+
+    .pill{
+      min-height:24px!important;
+      padding:4px 7px!important;
+      font-size:8.8px!important;
+    }
+
+    .navline{
+      margin-top:4px!important;
+      gap:5px!important;
+    }
+
+    .tab{
+      min-height:26px!important;
+      padding:5px 11px!important;
+      font-size:9.6px!important;
+    }
+
+    .status-chip{
+      min-height:23px!important;
+      padding:4px 8px!important;
+      font-size:8.2px!important;
+    }
+
+    .page{
+      margin-top:4px!important;
+    }
+
+    .content-grid{
+      margin-top:4px!important;
+      gap:6px!important;
+      align-items:start!important;
+    }
+
+    .left-stack,
+    .right-stack{
+      gap:6px!important;
+    }
+
+    .panel{
+      border-radius:12px!important;
+    }
+
+    .panel-head{
+      min-height:28px!important;
+      padding:4px 7px!important;
+    }
+
+    .object-body{
+      padding:6px!important;
+    }
+
+    /* Giu nhin ro nhu V17, chi giam nhe de du cho camera duoi */
+    .object-hero{
+      min-height:158px!important;
+      padding:8px!important;
+    }
+
+    .object-name{
+      font-size:31px!important;
+      line-height:.92!important;
+      margin-top:7px!important;
+    }
+
+    .object-label{
+      margin-top:4px!important;
+      font-size:10px!important;
+    }
+
+    .summary-grid{
+      left:8px!important;
+      right:8px!important;
+      bottom:8px!important;
+      gap:6px!important;
+    }
+
+    .summary{
+      min-height:36px!important;
+      padding:5px!important;
+    }
+
+    .summary .v{
+      font-size:13px!important;
+      margin-top:3px!important;
+    }
+
+    .chart-box{
+      height:96px!important;
+      padding:6px!important;
+    }
+
+    .force-body{
+      padding:5px!important;
+    }
+
+    .legend{
+      margin-top:4px!important;
+      font-size:9.5px!important;
+    }
+
+    .finger-body{
+      padding:5px 7px 6px!important;
+      gap:4px!important;
+      max-height:155px!important;
+      overflow:hidden!important;
+    }
+
+    .finger{
+      gap:3px!important;
+    }
+
+    .finger-top b,
+    .finger-top span{
+      font-size:10px!important;
+    }
+
+    .bar{
+      height:6px!important;
+    }
+
+    .angle-error-list{
+      padding:5px 7px 7px!important;
+      gap:4px!important;
+    }
+
+    .angle-row{
+      min-height:25px!important;
+      padding:4px 6px!important;
+    }
+
+    .footer{
+      display:none!important;
+    }
+
+  
+    /* ===================== V25: PAGE 1 GIU NGUYEN, PAGE 2 PHONG TO LAI ===================== */
+    #page2 .content-grid{
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;
+      gap:8px!important;
+      margin-top:6px!important;
+    }
+
+    #page2 .panel-head{
+      min-height:32px!important;
+      padding:6px 9px!important;
+    }
+
+    #page2 .head-title b{
+      font-size:10.2px!important;
+      letter-spacing:.13em!important;
+    }
+
+    #page2 .head-title span{
+      font-size:9.4px!important;
+    }
+
+    #page2 .badge{
+      min-height:27px!important;
+      padding:5px 8px!important;
+      font-size:9.5px!important;
+    }
+
+    #page2 .object-body{
+      padding:8px!important;
+    }
+
+    #page2 .object-hero{
+      min-height:226px!important;
+      padding:11px!important;
+    }
+
+    #page2 .object-name{
+      font-size:42px!important;
+      line-height:.90!important;
+      margin-top:9px!important;
+      max-width:74%!important;
+    }
+
+    #page2 .object-label{
+      font-size:11px!important;
+      margin-top:7px!important;
+    }
+
+    #page2 .summary-grid{
+      left:10px!important;
+      right:10px!important;
+      bottom:10px!important;
+      gap:8px!important;
+    }
+
+    #page2 .summary{
+      min-height:44px!important;
+      padding:7px!important;
+    }
+
+    #page2 .summary .k{
+      font-size:9.5px!important;
+    }
+
+    #page2 .summary .v{
+      font-size:15.5px!important;
+      margin-top:5px!important;
+    }
+
+    #page2 .force-body{
+      padding:8px!important;
+    }
+
+    #page2 .chart-box{
+      height:145px!important;
+      padding:8px!important;
+    }
+
+    #page2 .legend{
+      margin-top:6px!important;
+      font-size:10.5px!important;
+      gap:9px!important;
+    }
+
+    #page2 .finger-body{
+      padding:8px 9px 9px!important;
+      gap:7px!important;
+      max-height:205px!important;
+      overflow:hidden!important;
+    }
+
+    #page2 .finger{
+      gap:4px!important;
+    }
+
+    #page2 .finger-top b,
+    #page2 .finger-top span{
+      font-size:11.2px!important;
+    }
+
+    #page2 .bar{
+      height:6px!important;
+    }
+
+    /* ===================== V27: PAGE 1 WIDTH OK, PAGE 2 MEDIUM-NOT-HIDDEN ===================== */
+    .app{
+      width:min(900px,calc(100vw - 8px))!important;
+      max-height:calc(100vh - 6px)!important;
+      padding:0 8px 8px 0!important;
+      overflow-y:auto!important;
+      overflow-x:hidden!important;
+    }
+
+    .topbar{
+      min-height:54px!important;
+      padding:7px 10px!important;
+      grid-template-columns:auto minmax(330px,1fr) auto!important;
+      gap:12px!important;
+    }
+
+    .logo{
+      width:36px!important;
+      height:36px!important;
+      font-size:14px!important;
+    }
+
+    .title h1{
+      font-size:20px!important;
+    }
+
+    .title p{
+      font-size:10px!important;
+      margin-top:3px!important;
+    }
+
+    .top-pills{
+      gap:6px!important;
+    }
+
+    .pill{
+      min-height:27px!important;
+      padding:5px 8px!important;
+      font-size:9.6px!important;
+    }
+
+    .tabs{
+      margin-top:7px!important;
+      gap:8px!important;
+    }
+
+    .tabbtn{
+      min-height:33px!important;
+      padding:8px 15px!important;
+      font-size:11px!important;
+    }
+
+    .nav-status{
+      gap:7px!important;
+      margin-left:4px!important;
+    }
+
+    .status-chip{
+      min-height:28px!important;
+      padding:5px 9px!important;
+      font-size:9.2px!important;
+    }
+
+    .status-chip b{
+      font-size:9.2px!important;
+    }
+
+    .content-grid{
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;
+      gap:9px!important;
+    }
+
+    .left-stack,
+    .right-stack{
+      gap:9px!important;
+    }
+
+    .panel-head{
+      min-height:34px!important;
+      padding:6px 9px!important;
+    }
+
+    .head-title b{
+      font-size:10.5px!important;
+    }
+
+    .head-title span{
+      font-size:9.6px!important;
+    }
+
+    .badge{
+      min-height:29px!important;
+      padding:5px 9px!important;
+      font-size:10px!important;
+    }
+
+    .mode-row{
+      padding:12px!important;
+      gap:12px!important;
+    }
+
+    .mode-btn{
+      min-height:46px!important;
+      padding:11px 20px!important;
+      font-size:14px!important;
+    }
+
+    .control-body{
+      padding:10px 11px 12px!important;
+      gap:10px!important;
+    }
+
+    .control-top b,
+    .control-top span{
+      font-size:12.4px!important;
+    }
+
+    .sliderline{
+      grid-template-columns:82px 1fr 58px!important;
+      min-height:34px!important;
+      gap:12px!important;
+      font-size:13px!important;
+    }
+
+    .sliderline input[type=range]{
+      height:28px!important;
+    }
+
+    .manual-disabled-note{
+      padding:0 11px 11px!important;
+      font-size:12px!important;
+    }
+
+    .angle-error-list{
+      padding:8px 9px 10px!important;
+      gap:7px!important;
+    }
+
+    .angle-row{
+      grid-template-columns:60px 1fr 60px!important;
+      min-height:32px!important;
+      padding:6px 8px!important;
+    }
+
+    .angle-row b{
+      font-size:12px!important;
+    }
+
+    .angle-mid{
+      font-size:10.5px!important;
+    }
+
+    .angle-err{
+      font-size:13px!important;
+    }
+
+    #page2 .content-grid{
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;
+      gap:10px!important;
+      margin-top:7px!important;
+    }
+
+    #page2 .panel-head{
+      min-height:36px!important;
+      padding:7px 10px!important;
+    }
+
+    #page2 .head-title b{
+      font-size:11px!important;
+    }
+
+    #page2 .head-title span{
+      font-size:10px!important;
+    }
+
+    #page2 .badge{
+      min-height:30px!important;
+      padding:5px 10px!important;
+      font-size:10.2px!important;
+    }
+
+    #page2 .object-body{
+      padding:9px!important;
+    }
+
+    #page2 .object-hero{
+      min-height:285px!important;
+      padding:13px!important;
+    }
+
+    #page2 .object-hero:before{
+      right:22px!important;
+      top:24px!important;
+      width:116px!important;
+      height:116px!important;
+      border-radius:32px!important;
+    }
+
+    #page2 .object-hero:after{
+      right:58px!important;
+      top:68px!important;
+      width:52px!important;
+      height:52px!important;
+    }
+
+    #page2 .eyebrow{
+      font-size:11px!important;
+    }
+
+    #page2 .object-name{
+      font-size:54px!important;
+      line-height:.88!important;
+      margin-top:12px!important;
+      max-width:76%!important;
+    }
+
+    #page2 .object-label{
+      font-size:12px!important;
+      margin-top:9px!important;
+    }
+
+    #page2 .summary-grid{
+      left:12px!important;
+      right:12px!important;
+      bottom:12px!important;
+      gap:9px!important;
+    }
+
+    #page2 .summary{
+      min-height:58px!important;
+      padding:10px!important;
+    }
+
+    #page2 .summary .k{
+      font-size:10.4px!important;
+    }
+
+    #page2 .summary .v{
+      font-size:20px!important;
+      margin-top:7px!important;
+    }
+
+    #page2 .force-body{
+      padding:9px!important;
+    }
+
+    #page2 .chart-box{
+      height:165px!important;
+      padding:9px!important;
+    }
+
+    #page2 .legend{
+      margin-top:7px!important;
+      font-size:11.2px!important;
+      gap:10px!important;
+    }
+
+    #page2 .line-dot{
+      width:22px!important;
+      height:4px!important;
+    }
+
+    #page2 .finger-body{
+      padding:9px 10px 10px!important;
+      gap:7px!important;
+      max-height:none!important;
+      overflow:visible!important;
+    }
+
+    #page2 .finger{
+      gap:5px!important;
+      min-height:42px!important;
+      padding:6px 8px!important;
+      border:1px solid rgba(148,163,184,.14)!important;
+      border-radius:10px!important;
+      background:rgba(2,6,23,.22)!important;
+    }
+
+    #page2 .finger-top b,
+    #page2 .finger-top span{
+      font-size:12px!important;
+    }
+
+    #page2 .bar{
+      height:8px!important;
+    }
+
+    @media(max-width:900px){
+      html,body{overflow:auto!important}
+      .app{position:relative!important;left:auto!important;top:auto!important;width:calc(100vw - 16px)!important;margin-left:8px!important;max-height:none!important;padding:8px 0 18px!important;overflow:visible!important}
+      .topbar{grid-template-columns:auto 1fr!important}
+      .top-pills{grid-column:1/-1!important;justify-content:flex-start!important;flex-wrap:wrap!important}
+      .content-grid,#page2 .content-grid{grid-template-columns:1fr!important}
+      #page2 .object-hero{min-height:270px!important}
+    }
+
+
+
+    /* ===================== V33 FORCE RANGE UI ===================== */
+    #page2 .object-hero{
+      min-height:340px!important;
+    }
+    #page2 .summary-grid{
+      grid-template-columns:repeat(2,1fr)!important;
+    }
+    #page2 .summary{
+      min-height:54px!important;
+      padding:8px!important;
+    }
+    #page2 .summary .v{
+      font-size:18px!important;
+    }
+    #page2 .finger-body{
+      padding:8px 9px 10px!important;
+      gap:6px!important;
+    }
+    #page2 .finger{
+      min-height:46px!important;
+    }
+    #page2 .finger-top{
+      display:flex!important;
+      align-items:center!important;
+      justify-content:flex-start!important;
+      gap:8px!important;
+    }
+    #page2 .finger-top b{
+      min-width:52px!important;
+      font-size:11px!important;
+    }
+    #page2 .force-metrics{
+      flex:1!important;
+      justify-content:flex-start!important;
+      text-align:left!important;
+      gap:6px!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+    }
+    #page2 .force-metrics span{
+      font-size:10.4px!important;
+      font-weight:950!important;
+    }
+    #page2 .force-state{
+      min-width:58px!important;
+      text-align:right!important;
+      font-weight:1000!important;
+    }
+    #gripStateText{
+      font-size:15px!important;
+      white-space:nowrap!important;
+    }
+
+
+    /* ===================== V34: RESTORE PAGE 1 COMPACT + PAGE 2 NOT TOO TALL ===================== */
+    .app{
+      width:min(860px,calc(100vw - 8px))!important;
+    }
+
+    /* Page 1: return to compact demo size. Do not scale Page 1 up. */
+    #page1 .panel-head{
+      min-height:29px!important;
+      padding:5px 8px!important;
+    }
+    #page1 .head-title b{
+      font-size:9.8px!important;
+    }
+    #page1 .head-title span{
+      font-size:8.8px!important;
+    }
+    #page1 .badge{
+      min-height:25px!important;
+      padding:4px 7px!important;
+      font-size:9px!important;
+    }
+    #page1 .mode-row{
+      padding:8px 10px!important;
+      gap:10px!important;
+    }
+    #page1 .mode-btn{
+      min-height:38px!important;
+      padding:8px 16px!important;
+      font-size:12px!important;
+      border-radius:12px!important;
+    }
+    #page1 .control-body{
+      padding:7px 9px 8px!important;
+      gap:7px!important;
+    }
+    #page1 .control-row{
+      gap:3px!important;
+    }
+    #page1 .control-top b,
+    #page1 .control-top span{
+      font-size:10.6px!important;
+    }
+    #page1 .sliderline{
+      grid-template-columns:70px 1fr 48px!important;
+      min-height:28px!important;
+      gap:9px!important;
+      font-size:11px!important;
+    }
+    #page1 .sliderline input[type=range]{
+      height:22px!important;
+    }
+    #page1 .manual-disabled-note{
+      padding:0 9px 8px!important;
+      font-size:10.5px!important;
+    }
+    #page1 .angle-error-list{
+      padding:6px 8px 8px!important;
+      gap:5px!important;
+    }
+    #page1 .angle-row{
+      grid-template-columns:54px 1fr 54px!important;
+      min-height:27px!important;
+      padding:5px 7px!important;
+    }
+    #page1 .angle-row b{
+      font-size:11px!important;
+    }
+    #page1 .angle-mid{
+      font-size:9.4px!important;
+    }
+    #page1 .angle-err{
+      font-size:11.5px!important;
+    }
+
+    /* Page 2: only a moderate resize for 6 Object cells + force range rows. */
+    #page2 .content-grid{
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;
+      gap:8px!important;
+      margin-top:5px!important;
+    }
+    #page2 .panel-head{
+      min-height:30px!important;
+      padding:5px 8px!important;
+    }
+    #page2 .head-title b{
+      font-size:10px!important;
+    }
+    #page2 .head-title span{
+      font-size:8.8px!important;
+    }
+    #page2 .badge{
+      min-height:26px!important;
+      padding:4px 8px!important;
+      font-size:9px!important;
+    }
+    #page2 .object-body{
+      padding:6px!important;
+    }
+    #page2 .object-hero{
+      min-height:238px!important;
+      padding:8px!important;
+    }
+    #page2 .object-hero:before{
+      right:16px!important;
+      top:22px!important;
+      width:94px!important;
+      height:94px!important;
+      border-radius:28px!important;
+    }
+    #page2 .object-hero:after{
+      right:45px!important;
+      top:54px!important;
+      width:42px!important;
+      height:42px!important;
+    }
+    #page2 .eyebrow{
+      font-size:9.5px!important;
+    }
+    #page2 .object-name{
+      font-size:38px!important;
+      line-height:.90!important;
+      margin-top:8px!important;
+      max-width:74%!important;
+    }
+    #page2 .object-label{
+      font-size:10px!important;
+      margin-top:6px!important;
+    }
+    #page2 .summary-grid{
+      left:8px!important;
+      right:8px!important;
+      bottom:8px!important;
+      grid-template-columns:repeat(2,1fr)!important;
+      gap:6px!important;
+    }
+    #page2 .summary{
+      min-height:43px!important;
+      padding:6px!important;
+    }
+    #page2 .summary .k{
+      font-size:8.9px!important;
+    }
+    #page2 .summary .v{
+      font-size:15.5px!important;
+      margin-top:4px!important;
+    }
+    #gripStateText{
+      font-size:13.5px!important;
+      white-space:nowrap!important;
+    }
+    #page2 .force-body{
+      padding:6px!important;
+    }
+    #page2 .chart-box{
+      height:126px!important;
+      padding:7px!important;
+    }
+    #page2 .legend{
+      margin-top:4px!important;
+      font-size:9.5px!important;
+      gap:8px!important;
+    }
+    #page2 .line-dot{
+      width:18px!important;
+      height:3px!important;
+    }
+    #page2 .finger-body{
+      padding:6px 8px 7px!important;
+      gap:5px!important;
+      max-height:none!important;
+      overflow:visible!important;
+    }
+    #page2 .finger{
+      min-height:37px!important;
+      padding:5px 7px!important;
+      gap:3px!important;
+      border:1px solid rgba(148,163,184,.14)!important;
+      border-radius:10px!important;
+      background:rgba(2,6,23,.22)!important;
+    }
+    #page2 .finger-top{
+      justify-content:flex-start!important;
+      gap:7px!important;
+    }
+    #page2 .finger-top b{
+      min-width:48px!important;
+      font-size:10.6px!important;
+    }
+    #page2 .force-metrics{
+      flex:1!important;
+      justify-content:flex-start!important;
+      text-align:left!important;
+      gap:5px!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+    }
+    #page2 .force-metrics span{
+      font-size:8.9px!important;
+      font-weight:950!important;
+    }
+    #page2 .force-state{
+      min-width:52px!important;
+      text-align:right!important;
+      font-weight:1000!important;
+    }
+    #page2 .bar{
+      height:5px!important;
+    }
+
+
+  
+
+    /* ===================== V36 SERVO PULSE TEST PANEL - A SHOWS ALWAYS ===================== */
+    .pulse-panel-wrap{position:relative;z-index:3;margin:7px 0 0 0;max-width:392px;width:392px}
+    .pulse-bar{display:flex;align-items:center;gap:6px;min-height:24px;padding:3px 5px;border:1px solid rgba(34,211,238,.18);border-radius:10px;background:rgba(2,6,23,.26);max-width:392px}
+    .pulse-a{width:28px;height:22px;border-radius:8px;border:1px solid rgba(34,211,238,.36);background:rgba(34,211,238,.10);color:#67e8f9;font-size:11px;font-weight:1000;cursor:pointer;line-height:1}.pulse-a.on{border-color:rgba(245,158,11,.70);background:rgba(245,158,11,.16);color:#fcd34d}.pulse-a:disabled{cursor:not-allowed;opacity:.45}
+    .pulse-title{font-size:8.8px;font-weight:1000;color:#e6f4ff;text-transform:uppercase;letter-spacing:.09em;white-space:nowrap}.pulse-gate{margin-left:auto;font-size:8.8px;font-weight:1000;color:#fcd34d;white-space:nowrap}.pulse-gate.open{color:#86efac}.pulse-gate.off{color:#94a3b8}
+    .pulse-panel{display:none;margin-top:4px;border:1px solid rgba(148,163,184,.13);border-radius:10px;background:rgba(2,6,23,.33);padding:4px 5px;max-width:392px;width:392px}.pulse-panel.show{display:grid;gap:2px}.pulse-panel.locked{cursor:not-allowed}
+    .pulse-row{display:grid;grid-template-columns:49px 43px 50px 37px 61px 28px;gap:4px;align-items:center;min-height:21px;font-size:8.8px;font-weight:900;color:#dbeafe;white-space:nowrap}.pulse-row b{font-size:9px;color:#e7f4ff}.pulse-row .pct{color:#67e8f9;text-align:right}.pulse-row .us{color:#fcd34d;text-align:right}.pulse-row .label{color:#91a4be;text-align:right}.pulse-row input{width:61px;height:20px;border-radius:7px;border:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.85);color:#e6f4ff;font-size:9.5px;font-weight:900;text-align:center;outline:none}.pulse-row input:disabled{opacity:.35;cursor:not-allowed}.pulse-row button{width:28px;height:20px;border-radius:7px;border:1px solid rgba(34,211,238,.34);background:rgba(34,211,238,.10);color:#67e8f9;font-size:8.5px;font-weight:1000;cursor:pointer}.pulse-row button:disabled{opacity:.35;cursor:not-allowed}.pulse-lock-note{display:none;color:#fcd34d;font-size:8.2px;font-weight:900;line-height:1.1;padding:1px 2px 2px}.pulse-panel.show.locked .pulse-lock-note{display:block}
+    #page2 .object-hero{min-height:314px!important}
+    #page2 .object-name{font-size:50px!important}
+    #page2 .summary{min-height:48px!important;padding:7px!important}
+    #page2 .summary .v{font-size:16.5px!important;margin-top:5px!important}
+
+  
+    /* ===================== V40 SHOW INITIAL TARGET IN FINGER FORCE ===================== */
+    .target-t{
+      color:#f8fafc!important;
+      font-weight:1000!important;
+    }
+    #page2 .force-metrics{
+      gap:4px!important;
+    }
+    #page2 .force-metrics span{
+      font-size:8.5px!important;
+      letter-spacing:.01em!important;
+    }
+    #page2 .force-state{
+      min-width:50px!important;
+    }
+
+
+
+    /* ===================== V41 DATN SCHOOL / FACULTY HEADER ===================== */
+    .thesis-header{
+      display:grid!important;
+      grid-template-columns:92px minmax(0,1fr) 92px!important;
+      align-items:center!important;
+      gap:13px!important;
+      min-height:126px!important;
+      padding:12px 15px!important;
+      border:1px solid rgba(148,163,184,.22)!important;
+      border-radius:18px!important;
+      background:linear-gradient(180deg,rgba(15,23,42,.94),rgba(11,19,34,.76))!important;
+      box-shadow:var(--shadow)!important;
+      backdrop-filter:blur(18px)!important;
+    }
+
+    .thesis-logo-box{
+      width:84px!important;
+      height:96px!important;
+      display:flex!important;
+      align-items:center!important;
+      justify-content:center!important;
+      border-radius:15px!important;
+      border:1px solid rgba(226,232,240,.95)!important;
+      background:#ffffff!important;
+      box-shadow:0 10px 26px rgba(0,0,0,.24), inset 0 0 0 1px rgba(15,23,42,.06)!important;
+      padding:6px!important;
+      overflow:hidden!important;
+    }
+
+    .thesis-logo-box img{
+      width:100%!important;
+      height:100%!important;
+      object-fit:contain!important;
+      display:block!important;
+    }
+
+    .thesis-center{
+      min-width:0!important;
+      text-align:center!important;
+      line-height:1.18!important;
+    }
+
+    .school-name{
+      color:#f8fafc!important;
+      font-size:13.4px!important;
+      font-weight:1000!important;
+      letter-spacing:.035em!important;
+      text-transform:uppercase!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+      text-overflow:ellipsis!important;
+      text-shadow:0 0 18px rgba(96,165,250,.14)!important;
+    }
+
+    .faculty-name{
+      margin-top:4px!important;
+      color:#bfdbfe!important;
+      font-size:12.2px!important;
+      font-weight:950!important;
+      letter-spacing:.105em!important;
+      text-transform:uppercase!important;
+    }
+
+    .topic-title{
+      margin-top:10px!important;
+      color:#67e8f9!important;
+      font-size:20px!important;
+      font-weight:1000!important;
+      letter-spacing:.018em!important;
+      text-transform:uppercase!important;
+      text-shadow:0 0 20px rgba(34,211,238,.20)!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+      text-overflow:ellipsis!important;
+    }
+
+    .thesis-info{
+      margin-top:7px!important;
+      color:#dbeafe!important;
+      font-size:12px!important;
+      font-weight:850!important;
+    }
+
+    .thesis-info .student-line{
+      margin-top:2px!important;
+      color:#cbd5e1!important;
+    }
+
+    .runtimebar{
+      margin-top:7px!important;
+      display:grid!important;
+      grid-template-columns:minmax(0,1fr) auto!important;
+      min-height:38px!important;
+      padding:6px 10px!important;
+      gap:10px!important;
+      border-radius:14px!important;
+    }
+
+    .runtime-left{
+      min-width:0!important;
+      display:flex!important;
+      align-items:center!important;
+      gap:8px!important;
+      color:#91a4be!important;
+      font-size:10px!important;
+      font-weight:900!important;
+      white-space:nowrap!important;
+      overflow:hidden!important;
+      text-overflow:ellipsis!important;
+    }
+
+    .runtime-left b{
+      color:#e6f4ff!important;
+      letter-spacing:.06em!important;
+      text-transform:uppercase!important;
+    }
+
+    .runtimebar .top-pills{
+      justify-content:flex-end!important;
+      flex-wrap:nowrap!important;
+      gap:6px!important;
+    }
+
+    @media(max-width:900px){
+      .thesis-header{
+        grid-template-columns:70px minmax(0,1fr) 70px!important;
+        min-height:118px!important;
+        gap:8px!important;
+        padding:10px!important;
+      }
+      .thesis-logo-box{width:66px!important;height:78px!important;padding:5px!important}
+      .school-name{font-size:10.5px!important;white-space:normal!important}
+      .faculty-name{font-size:10px!important}
+      .topic-title{font-size:15px!important;white-space:normal!important}
+      .thesis-info{font-size:10px!important}
+      .runtimebar{grid-template-columns:1fr!important}
+      .runtimebar .top-pills{justify-content:flex-start!important;flex-wrap:wrap!important}
+    }
+
+
+/* ===================== DATN HEADER BIG LOGO V2 START ===================== */
+.app{
+  width:min(900px,calc(100vw - 8px))!important;
+}
+
+.thesis-header{
+  grid-template-columns:112px minmax(0,1fr) 112px!important;
+  min-height:132px!important;
+  padding:12px 16px!important;
+  gap:16px!important;
+  border-radius:16px!important;
+}
+
+.thesis-logo-box{
+  width:100px!important;
+  height:100px!important;
+  min-height:100px!important;
+  padding:4px!important;
+  border-radius:15px!important;
+  background:#ffffff!important;
+  border:1px solid rgba(255,255,255,.90)!important;
+  box-shadow:0 10px 28px rgba(0,0,0,.22)!important;
+}
+
+.thesis-logo-box img{
+  width:92px!important;
+  height:92px!important;
+  object-fit:contain!important;
+  display:block!important;
+}
+
+/* Ẩn chữ dự phòng HCMUTE/FEEE để logo thật chiếm gần hết khung trắng. */
+.thesis-logo-box .logo-fallback{
+  display:none!important;
+}
+
+.school-name{
+  font-size:15.4px!important;
+  line-height:1.16!important;
+  letter-spacing:.052em!important;
+  font-weight:1000!important;
+}
+
+.faculty-name{
+  margin-top:5px!important;
+  font-size:13.2px!important;
+  line-height:1.14!important;
+  letter-spacing:.12em!important;
+}
+
+.topic-title{
+  margin-top:11px!important;
+  font-size:22px!important;
+  line-height:1.08!important;
+  letter-spacing:.035em!important;
+}
+
+.thesis-info{
+  margin-top:7px!important;
+  font-size:12.8px!important;
+  line-height:1.22!important;
+}
+
+.thesis-info .student-line{
+  margin-top:2px!important;
+}
+
+.runtimebar{
+  margin-top:7px!important;
+}
+
+@media(max-width:900px){
+  .app{
+    width:calc(100vw - 16px)!important;
+  }
+  .thesis-header{
+    grid-template-columns:82px minmax(0,1fr) 82px!important;
+    min-height:118px!important;
+    padding:10px 9px!important;
+    gap:8px!important;
+  }
+  .thesis-logo-box{
+    width:74px!important;
+    height:74px!important;
+    min-height:74px!important;
+    padding:3px!important;
+  }
+  .thesis-logo-box img{
+    width:68px!important;
+    height:68px!important;
+  }
+  .school-name{
+    font-size:12px!important;
+    white-space:normal!important;
+  }
+  .faculty-name{
+    font-size:10.8px!important;
+  }
+  .topic-title{
+    font-size:15.5px!important;
+  }
+  .thesis-info{
+    font-size:10.5px!important;
+  }
+}
+/* ===================== DATN HEADER BIG LOGO V2 END ===================== */
+
+
+    /* ===================== DATN LOGO FILL FRAME FIX ===================== */
+    .thesis-header{
+      grid-template-columns:112px minmax(0,1fr) 112px!important;
+      min-height:132px!important;
+      padding:8px 12px!important;
+    }
+
+    .thesis-logo-box{
+      width:104px!important;
+      height:104px!important;
+      min-height:104px!important;
+      padding:0!important;
+      border-radius:14px!important;
+      background:#ffffff!important;
+      overflow:hidden!important;
+      display:flex!important;
+      align-items:center!important;
+      justify-content:center!important;
+    }
+
+    .thesis-logo-box img{
+      width:100%!important;
+      height:100%!important;
+      max-width:none!important;
+      max-height:none!important;
+      object-fit:contain!important;
+      display:block!important;
+      transform:scale(1.78)!important;
+      transform-origin:center center!important;
+    }
+
+    .thesis-logo-box .logo-fallback{
+      display:none!important;
+    }
+
+    .school-name{
+      font-size:15.8px!important;
+      letter-spacing:.055em!important;
+    }
+
+    .faculty-name{
+      font-size:13px!important;
+    }
+
+    .topic-title{
+      font-size:21px!important;
+      margin-top:8px!important;
+    }
+
+    .thesis-info{
+      font-size:12.5px!important;
+      margin-top:5px!important;
+    }
+
+</style>
+</head>
+<body>
+  <main class="app">
+
+    <header class="thesis-header">
+      <div class="thesis-logo-box">
+        <img src="/api/logo/school" alt="Logo trường">
+      </div>
+
+      <div class="thesis-center">
+        <div class="school-name">TRƯỜNG ĐẠI HỌC CÔNG NGHỆ KỸ THUẬT TP. HỒ CHÍ MINH</div>
+        <div class="faculty-name">KHOA ĐIỆN - ĐIỆN TỬ</div>
+        <div class="topic-title">Đề tài: DIGITAL TWIN FOR HAND ROBOT</div>
+        <div class="thesis-info">
+          <div>GVHD: TS. Trần Vi Đô</div>
+          <div class="student-line">SVTH: Phạm Kiến Hào - 22151075</div>
+          <div class="student-line">Huỳnh Ngọc Hoàng Anh - 22151047</div>
+        </div>
+      </div>
+
+      <div class="thesis-logo-box">
+        <img src="/api/logo/faculty" alt="Logo khoa">
+      </div>
+    </header>
+
+    <header class="topbar runtimebar">
+      <div class="runtime-left">
+        <b>DIGITAL TWIN FOR HAND ROBOT</b>
+        <span>Realtime Dashboard · Python · ESP32 · Unity</span>
+      </div>
+
+      <div class="top-pills">
+        <div class="pill"><span class="live-dot" id="liveDot"></span><span id="liveText">LIVE</span></div>
+        <div class="pill">Mode <span id="topMode">AUTO</span></div>
+        <div class="pill">Palm Sensor <span id="palmSensorTop" class="palm-mini off">OFF</span></div>
+        <div class="pill" id="palmTestPill" onclick="togglePalmTest()" title="Click to toggle PALM TEST. It is locked when the real Palm Sensor is ON.">Palm Test <span id="palmTestTop" class="palm-mini off">OFF</span></div>
+        <div class="pill">FPS <span id="topFps" class="cyan-t">0.0</span></div>
+        <div class="pill"><span id="latencyBadge">0 ms</span></div>
+      </div>
+    </header>
+    <nav class="tabs"><button class="tabbtn active" id="tabPage1" onclick="selectPage('page1',true)">PAGE 1 · Gesture / Auto-Manu</button><button class="tabbtn" id="tabPage2" onclick="selectPage('page2',true)">PAGE 2 · Object Grip Monitor</button><span class="nav-status"><span class="status-chip"><b>ESP32</b> <span id="esp32Status">Unknown</span></span><span class="status-chip"><b>Unity</b> <span id="unityStatus">Unknown</span></span></span></nav>
+
+    <section class="page active" id="page1">
+      <section class="content-grid">
+        <div class="left-stack">
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Control Mode</b><span>Direct AUTO/MANU control from web</span></div><div class="badge" id="page1ModeBadge">AUTO</div></div><div class="mode-row"><button class="mode-btn" id="btnAuto" onclick="setMode('AUTO')">AUTO · Gesture detect</button><button class="mode-btn manual" id="btnManu" onclick="setMode('MANU')">MANU · Web sliders</button></div></article>
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Auto Command Bars</b><span>5 command bars from gesture/auto pipeline</span></div><div class="badge">AUTO</div></div><div class="control-body" id="autoBars"></div></article>
+        </div>
+        <div class="right-stack">
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Manual Web Sliders</b><span>Sliders are enabled only in MANU mode</span></div><div class="badge amber" id="manualBadge">READY</div></div><div class="control-body" id="manualSliders"></div><div class="manual-disabled-note" id="manualDisabledNote">Currently in AUTO: press MANU before moving sliders.</div></article>
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Angle Error Analysis</b><span>Compare hand command and Unity simulated angle</span></div><div class="badge">5 ANGLES</div></div><div class="angle-error-list" id="angleErrorList"></div></article>
+        </div>
+      </section>
+    </section>
+
+    <section class="page" id="page2">
+      <section class="content-grid">
+        <div class="left-stack">
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Object and Grip</b><span>YOLO object recognition and auto-grip decision</span></div><div class="badge" id="gripBadge">FREE_TRACKING_AUTO</div></div><div class="object-body"><div class="object-hero"><div class="eyebrow">YOLO stable object</div><div class="object-name" id="objectName">None</div><div class="object-label">Label: <span id="objectLabel">none</span></div><div class="summary-grid"><div class="summary"><div class="k">Mass</div><div class="v"><span id="massG">0</span> g</div></div><div class="summary"><div class="k">Weight Force</div><div class="v"><span id="loadcellN">0.00</span> N</div></div><div class="summary"><div class="k">Required</div><div class="v"><span id="requiredMin">0.00</span> - <span id="requiredMax">0.00</span> N</div></div><div class="summary"><div class="k">Target Total</div><div class="v"><span id="targetTotal">0.00</span> N</div></div><div class="summary"><div class="k">Actual Grip</div><div class="v"><span id="actualGripN">0.00</span> N</div></div><div class="summary"><div class="k">Grip State</div><div class="v"><span id="gripStateText">NO TOUCH</span></div></div></div></div><div class="pulse-panel-wrap"><div class="pulse-bar"><button class="pulse-a" id="pulseAButton" onclick="togglePulsePanel()" title="Press A or click here to show/hide pulse test panel. Inputs stay locked until object + FSR touch.">A</button><span class="pulse-title">Pulse test</span><span class="pulse-gate" id="pulseGateText">LOCKED</span></div><div class="pulse-panel" id="servoPulsePanel"><div class="pulse-lock-note">Input locked: need object + at least one FSR touch.</div><div class="pulse-row"><b>THUMB</b><span class="pct" id="pulseThumbPct">0%</span><span class="us" id="pulseThumbUs">0</span><span class="label">Input</span><input id="pulseThumbInput" type="number" min="400" max="2500" step="1" placeholder="us"><button id="pulseThumbBtn" onclick="sendPulseUs('thumb')">OK</button></div><div class="pulse-row"><b>INDEX</b><span class="pct" id="pulseIndexPct">0%</span><span class="us" id="pulseIndexUs">0</span><span class="label">Input</span><input id="pulseIndexInput" type="number" min="400" max="2500" step="1" placeholder="us"><button id="pulseIndexBtn" onclick="sendPulseUs('index')">OK</button></div><div class="pulse-row"><b>MIDDLE</b><span class="pct" id="pulseMiddlePct">0%</span><span class="us" id="pulseMiddleUs">0</span><span class="label">Input</span><input id="pulseMiddleInput" type="number" min="400" max="2500" step="1" placeholder="us"><button id="pulseMiddleBtn" onclick="sendPulseUs('middle')">OK</button></div><div class="pulse-row"><b>RING</b><span class="pct" id="pulseRingPct">0%</span><span class="us" id="pulseRingUs">0</span><span class="label">Input</span><input id="pulseRingInput" type="number" min="400" max="2500" step="1" placeholder="us"><button id="pulseRingBtn" onclick="sendPulseUs('ring')">OK</button></div><div class="pulse-row"><b>PINKY</b><span class="pct" id="pulsePinkyPct">0%</span><span class="us" id="pulsePinkyUs">0</span><span class="label">Input</span><input id="pulsePinkyInput" type="number" min="400" max="2500" step="1" placeholder="us"><button id="pulsePinkyBtn" onclick="sendPulseUs('pinky')">OK</button></div></div></div></div></article>
+        </div>
+        <div class="right-stack">
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Force Trend</b><span>Realtime FSR force of each robot finger</span></div><div class="badge" id="forceBadge">Realtime</div></div><div class="force-body"><div class="chart-box"><canvas id="forceCanvas" width="760" height="300"></canvas></div><div class="legend"><span class="line-key"><i class="line-dot index"></i>Index</span><span class="line-key"><i class="line-dot middle"></i>Middle</span><span class="line-key"><i class="line-dot ring"></i>Ring</span><span class="line-key"><i class="line-dot pinky"></i>Pinky</span></div></div></article>
+          <article class="panel"><div class="panel-head"><div class="head-title"><b>Finger Force</b><span>Actual FSR force and target force per finger</span></div><div class="badge">N</div></div><div class="finger-body" id="fingerForces"></div></article>
+        </div>
+      </section>
+    </section>
+    <footer class="footer"><span>Page 1: AUTO/MANU · Page 2: object grip · Camera stays in Python window.</span><span>DATN Robot Hand · V40 pulse panel</span></footer>
+  </main>
+
+<script>
+const $=id=>document.getElementById(id); const history=[]; const fingers=[['thumb','Thumb'],['index','Index'],['middle','Middle'],['ring','Ring'],['pinky','Pinky']];
+let currentPage='page1';
+let manualLockUntil=0;
+let lastData={};
+let controlMode='AUTO';
+let manual={thumb:0,index:0,middle:0,ring:0,pinky:0};
+let servoPulsePanelOn=false;
+const pulseFingers=[['thumb','Thumb'],['index','Index'],['middle','Middle'],['ring','Ring'],['pinky','Pinky']];
+const servoOpenUs={thumb:800,index:500,middle:800,ring:2200,pinky:2300};
+const servoCloseUs={thumb:1500,index:2000,middle:2000,ring:800,pinky:1000};
+function servoUsFromPct(k,pct){
+  const open=Number(servoOpenUs[k]??0), close=Number(servoCloseUs[k]??0);
+  const p=Math.max(0,Math.min(100,Number(pct)||0));
+  if(!Number.isFinite(open)||!Number.isFinite(close)||open<=0||close<=0) return 0;
+  return Math.round(open+(close-open)*p/100.0);
+}
+function isTypingTarget(el){
+  if(!el) return false;
+  const tag=String(el.tagName||'').toLowerCase();
+  return tag==='input'||tag==='textarea'||tag==='select'||el.isContentEditable;
+}
+document.addEventListener('keydown',function(ev){
+  if(ev.ctrlKey||ev.altKey||ev.metaKey) return;
+  if(String(ev.key||'').toLowerCase()==='a'){
+    if(isTypingTarget(document.activeElement)) return;
+    ev.preventDefault();
+    togglePulsePanel();
+  }
+});
+
+// V13 OBJECT PAGE LATCH:
+// Khi YOLO nhan vat 1 lan, web chuyen sang Page 2 va giu Page 2.
+// Neu dua vat ra khoi khung hinh, web KHONG tu nhay ve Page 1 nua.
+// Page 1 chi quay lai khi nguoi dung bam tab Page 1.
+let objectLatch={
+  active:false,
+  label:'none',
+  name:'None',
+  mass_g:0,
+  required_min_n:0,
+  required_max_n:0,
+  target_total_n:0,
+  lockedAt:0
+};
+function fmt(x,d=2){const n=Number(x);return Number.isFinite(n)?n.toFixed(d):(0).toFixed(d)} function pct(x,max=18.5){const n=Number(x);return Number.isFinite(n)?Math.max(0,Math.min(100,n/max*100)):0} function upper(s){return String(s||'').toUpperCase()} function cleanState(s){return String(s||'').replace('_AUTO','').replaceAll('_',' ')}
+const FORCE_CONTACT_N=0.25, FORCE_LOW_MARGIN_N=0.30, FORCE_HIGH_MARGIN_N=1.20;
+function forceBand(actual,touch){actual=Number(actual)||0;touch=Number(touch)||0;if(touch<=0||actual<FORCE_CONTACT_N){return{active:false,touch:0,low:0,high:0,state:'NO TOUCH',cls:'amber-t'}}const low=Math.max(0,touch-FORCE_LOW_MARGIN_N),high=touch+FORCE_HIGH_MARGIN_N;let state='HOLD',cls='green-t';if(actual<low){state='CLOSING';cls='amber-t'}else if(actual>high){state='OVER';cls='orange-t'}return{active:true,touch,low,high,state,cls}}
+function totalGripState(actual,target,reqMin,reqMax,activeCount){actual=Number(actual)||0;target=Number(target)||0;reqMin=Number(reqMin)||0;reqMax=Number(reqMax)||0;activeCount=Number(activeCount)||0;if(target<=0)return{txt:'NO OBJECT',cls:'amber-t'};if(activeCount<=0||actual<FORCE_CONTACT_N)return{txt:'WAIT TOUCH',cls:'amber-t'};if(reqMin>0&&actual<reqMin)return{txt:'LOW FORCE',cls:'amber-t'};if(reqMax>0&&actual>reqMax)return{txt:'HIGH FORCE',cls:'orange-t'};return{txt:'HOLD OK',cls:'green-t'}}
+function setTextClass(el,cls){if(!el)return;el.classList.remove('green-t','cyan-t','amber-t','red-t','orange-t');if(cls)el.classList.add(cls)} function setBadgeClass(el,cls){if(!el)return;el.classList.remove('green','amber','red');if(cls)el.classList.add(cls)}
+function hasDetectedObject(d){
+  return Boolean(d.object_label && d.object_label !== 'none' && d.object_name && d.object_name !== 'None');
+}
+
+function updateObjectLatch(d){
+  if(!hasDetectedObject(d)) return;
+
+  objectLatch.active=true;
+  objectLatch.label=d.object_label || 'none';
+  objectLatch.name=d.object_name || 'None';
+  objectLatch.mass_g=Number(d.mass_g || 0);
+  objectLatch.required_min_n=Number(d.required_min_n || 0);
+  objectLatch.required_max_n=Number(d.required_max_n || 0);
+  objectLatch.target_total_n=Number(d.target_total_n || 0);
+  objectLatch.lockedAt=Date.now();
+}
+
+function getDisplayObjectData(d){
+  // Neu vat da tung duoc nhan dien, giu ten/khoi luong/target tren Page 2
+  // ngay ca khi vat da roi khoi khung hinh camera.
+  if(!hasDetectedObject(d) && objectLatch.active){
+    return {
+      label:objectLatch.label,
+      name:objectLatch.name,
+      mass_g:objectLatch.mass_g,
+      required_min_n:Number(d.required_min_n || objectLatch.required_min_n || 0),
+      required_max_n:Number(d.required_max_n || objectLatch.required_max_n || 0),
+      target_total_n:Number(d.target_total_n || objectLatch.target_total_n || 0),
+    };
+  }
+
+  return {
+    label:d.object_label || 'none',
+    name:d.object_name || 'None',
+    mass_g:Number(d.mass_g || 0),
+    required_min_n:Number(d.required_min_n || 0),
+    required_max_n:Number(d.required_max_n || 0),
+    target_total_n:Number(d.target_total_n || 0),
+  };
+}
+
+function selectPage(p,user=false){
+  currentPage=p;
+  if(user) manualLockUntil=Date.now()+8000;
+  ['page1','page2'].forEach(id=>$(id).classList.toggle('active',id===p));
+  $('tabPage1').classList.toggle('active',p==='page1');
+  $('tabPage2').classList.toggle('active',p==='page2');
+}
+
+function autoSwitchPage(d){
+  const hasObj=hasDetectedObject(d);
+  updateObjectLatch(d);
+
+  if(Date.now()<manualLockUntil) return;
+
+  // V13: Co vat -> tu dong qua Page 2.
+  // Mat vat -> KHONG tu dong ve Page 1 nua.
+  // Ly do: thuc te dua vat qua camera 1 lan de he thong biet vat,
+  // sau do vat co the nam sau lung camera / ngoai khung hinh.
+  if(hasObj && currentPage!=='page2') selectPage('page2',false);
+}
+async function postControl(payload){try{await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})}catch(e){}}
+function togglePalmTest(){
+  if(lastData && lastData.palm_sensor){return;}
+  postControl({palm_test_toggle:true});
+}
+function pulseGateOpen(d){
+  if(!d)return false;
+  const hasObj=Boolean((d.object_label&&d.object_label!=='none')||objectLatch.active);
+  const active=Number(d.touch_target_active_count||0);
+  const total=Number(d.fsr_index_n||0)+Number(d.fsr_middle_n||0)+Number(d.fsr_ring_n||0)+Number(d.fsr_pinky_n||0);
+  return Boolean(hasObj && (active>=1 || total>=0.25));
+}
+function togglePulsePanel(){
+  // V36: A only shows/hides the compact panel.
+  // Inputs are locked by gate condition, but the panel can always be displayed for checking current pulse.
+  servoPulsePanelOn=!servoPulsePanelOn;
+  if(!servoPulsePanelOn){postControl({servo_pulse_override_enabled:false});}
+  updatePulsePanel(lastData||{});
+}
+function sendPulseUs(k){
+  const inp=$('pulse'+k.charAt(0).toUpperCase()+k.slice(1)+'Input');
+  if(!inp || !servoPulsePanelOn || !pulseGateOpen(lastData)){return;}
+  let us=parseInt(inp.value,10);
+  if(!Number.isFinite(us))return;
+  us=Math.max(400,Math.min(2500,us));
+  inp.value=String(us);
+  const p={servo_pulse_override_enabled:true};
+  p['servo_pulse_'+k+'_us']=us;
+  postControl(p);
+}
+function updatePulsePanel(d){
+  const gate=pulseGateOpen(d);
+  const panel=$('servoPulsePanel'), btn=$('pulseAButton'), gt=$('pulseGateText');
+  if(panel){panel.classList.toggle('show',servoPulsePanelOn);panel.classList.toggle('locked',servoPulsePanelOn&&!gate);}
+  if(btn){btn.classList.toggle('on',servoPulsePanelOn);btn.disabled=false;}
+  if(gt){gt.textContent=servoPulsePanelOn?(gate?'READY':'INPUT LOCKED'):'OFF';gt.className='pulse-gate '+(servoPulsePanelOn?(gate?'open':''):'off')}
+  pulseFingers.forEach(([k,name])=>{
+    const cap=k.charAt(0).toUpperCase()+k.slice(1);
+    const pctRaw=Number(d['servo_'+k+'_pct']||d['unity_'+k+'_pct']||0);
+    const pct=Number.isFinite(pctRaw)?pctRaw:0;
+    // Display pulse follows the percent shown beside it:
+    // 0% = openUs, 100% = closeUs. Ring/Pinky can decrease when closing.
+    let us=servoUsFromPct(k,pct);
+    // If percentage is unavailable but ESP32 sent a valid readback, use readback as fallback.
+    const serverUs=Number(d['servo_'+k+'_us']||0);
+    if((!us || us<=0) && Number.isFinite(serverUs) && serverUs>=400 && serverUs<=2500) us=serverUs;
+    if($('pulse'+cap+'Pct'))$('pulse'+cap+'Pct').textContent=Math.round(pct)+'%';
+    if($('pulse'+cap+'Us'))$('pulse'+cap+'Us').textContent=us?String(Math.round(us)):'0';
+    const inp=$('pulse'+cap+'Input'), ok=$('pulse'+cap+'Btn');
+    if(inp){inp.disabled=!(servoPulsePanelOn&&gate);inp.title=gate?'Enter 400-2500 us':'Locked: need object + at least one FSR touch';}
+    if(ok){ok.disabled=!(servoPulsePanelOn&&gate);ok.title=gate?'Send raw servo pulse':'Locked: need object + at least one FSR touch';}
+  });
+}
+function setMode(m){controlMode=m;postControl({mode:m,...Object.fromEntries(Object.entries(manual).map(([k,v])=>['manual_'+k+'_pct',v]))});renderMode()}
+function renderMode(){const isManu=controlMode==='MANU';if($('btnAuto'))$('btnAuto').classList.toggle('active',controlMode==='AUTO'); if($('btnManu'))$('btnManu').classList.toggle('active',isManu); if($('page1ModeBadge'))$('page1ModeBadge').textContent=controlMode; if($('manualBadge'))$('manualBadge').textContent=isManu?'WEB MANU ACTIVE':'READY'; if($('manualDisabledNote'))$('manualDisabledNote').classList.toggle('show',!isManu); fingers.forEach(([k])=>{const el=$('man_'+k); if(el)el.disabled=!isManu})}
+function handleManualInput(k,el){if(controlMode!=='MANU'){el.value=String(Math.round(manual[k]||0));return;}manual[k]=Number(el.value);$('man_'+k+'_val').textContent=el.value+'%';const p={mode:'MANU'};p['manual_'+k+'_pct']=manual[k];postControl(p)}
+function buildControls(){const auto=$('autoBars'), man=$('manualSliders'), force=$('fingerForces'), err=$('angleErrorList'); auto.innerHTML=''; man.innerHTML=''; force.innerHTML=''; if(err)err.innerHTML='';
+  fingers.forEach(([k,name])=>{auto.insertAdjacentHTML('beforeend',`<div class="control-row"><div class="control-top"><b>${name}</b><span><span id="auto_${k}">0</span>%</span></div><div class="bar"><i id="auto_${k}_bar"></i></div></div>`)});
+  fingers.forEach(([k,name])=>{man.insertAdjacentHTML('beforeend',`<div class="sliderline"><b>${name}</b><input id="man_${k}" type="range" min="0" max="100" value="0" oninput="handleManualInput('${k}',this)"><span id="man_${k}_val">0%</span></div>`)});
+  force.insertAdjacentHTML('beforeend',`<div class="finger thumb-row"><div class="finger-top"><b>Thumb</b><span class="force-metrics"><span>Actual <span id="thumbN">0.00</span> N</span><span class="closing-text">PALM</span></span></div><div class="bar"><i id="thumbBar"></i></div></div>`);
+  [['index','Index'],['middle','Middle'],['ring','Ring'],['pinky','Pinky']].forEach(([k,name])=>{force.insertAdjacentHTML('beforeend',`<div class="finger"><div class="finger-top"><b>${name}</b><span class="force-metrics" title="A=Actual FSR force, Tg=initial equal target, Tc=touch target, OK=allowed force band"><span>A <span id="${k}N">0.00</span>N</span><span>Tg <span class="target-t" id="${k}Target">0.00</span>N</span><span>Tc <span class="amber-t" id="${k}Touch">0.00</span>N</span><span>OK <span class="cyan-t" id="${k}Range">0.00-0.00</span>N</span><span class="force-state" id="${k}ForceState">NO TOUCH</span></span></div><div class="bar"><i id="${k}Bar" ${k==='pinky'?'class="warn"':''}></i></div></div>`)});
+  fingers.forEach(([k,name])=>{if(err)err.insertAdjacentHTML('beforeend',`<div class="angle-row"><b>${name}</b><span class="angle-mid">Hand <span id="hand_${k}">0</span>% · Unity <span id="unity_${k}">0</span>%</span><span class="angle-err" id="err_${k}">0°</span></div>`)})
+}
+function bar(id,val,max=100,warn=false){const el=$(id);if(!el)return;el.style.width=Math.max(0,Math.min(100,Number(val||0)/max*100))+'%'; if(warn)el.classList.add('warn'); else el.classList.remove('warn')}
+function statusText(id,value){const el=$(id);if(!el)return;el.textContent=value;const s=upper(value);if(s.includes('CONNECTED')||s.includes('OK')||s.includes('ACTIVE')||s.includes('READY')||s.includes('RUN')||s.includes('ON'))setTextClass(el,'green-t');else if(s.includes('OFF')||s.includes('UNKNOWN')||s.includes('WAIT')||s.includes('DISABLED'))setTextClass(el,'amber-t');else if(s.includes('ERROR')||s.includes('FAIL'))setTextClass(el,'red-t');else setTextClass(el,'')}
+function getChartSurface(c){
+  const dpr=window.devicePixelRatio||1;
+  const rect=c.getBoundingClientRect();
+  const cssW=Math.max(1,Math.round(rect.width||c.clientWidth||760));
+  const cssH=Math.max(1,Math.round(rect.height||c.clientHeight||300));
+  const pxW=Math.round(cssW*dpr),pxH=Math.round(cssH*dpr);
+  if(c.width!==pxW||c.height!==pxH){c.width=pxW;c.height=pxH}
+  const ctx=c.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {ctx,w:cssW,h:cssH};
+}
+function drawChart(index,middle,ring,pinky){
+  history.push({index:Number(index)||0,middle:Number(middle)||0,ring:Number(ring)||0,pinky:Number(pinky)||0});
+  if(history.length>105)history.shift();
+  const c=$('forceCanvas'),surface=getChartSurface(c),ctx=surface.ctx,w=surface.w,h=surface.h;
+  ctx.clearRect(0,0,w,h);
+  const padL=44,padR=16,padT=16,padB=34,pw=w-padL-padR,ph=h-padT-padB;
+  const maxVal=Math.max(4,...history.flatMap(p=>[p.index,p.middle,p.ring,p.pinky]))*1.25;
+  ctx.strokeStyle='rgba(148,163,184,.20)';
+  ctx.lineWidth=1;
+  ctx.fillStyle='rgba(190,205,225,.90)';
+  ctx.font='bold 12px system-ui';
+  for(let i=0;i<=4;i++){
+    const y=padT+ph/4*i;
+    ctx.beginPath();
+    ctx.moveTo(padL,y);
+    ctx.lineTo(w-padR,y);
+    ctx.stroke();
+    ctx.fillText((maxVal-maxVal/4*i).toFixed(1),7,y+5);
+  }
+  function point(i,v){return[padL+(history.length<=1?0:i*(pw/(history.length-1))),padT+ph-(v/maxVal)*ph]}
+  function line(key,color,width){
+    ctx.strokeStyle=color;
+    ctx.lineWidth=width;
+    ctx.lineJoin='round';
+    ctx.lineCap='round';
+    ctx.beginPath();
+    history.forEach((p,i)=>{const [x,y]=point(i,p[key]);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});
+    ctx.stroke();
+  }
+  line('index','rgba(96,165,250,.96)',3.0);
+  line('middle','rgba(34,211,238,.98)',3.0);
+  line('ring','rgba(34,197,94,.96)',3.0);
+  line('pinky','rgba(251,146,60,.96)',3.0);
+  ctx.fillStyle='rgba(226,232,240,.94)';
+  ctx.font='bold 12px system-ui';
+  ctx.fillText('Realtime finger force trend (N)',padL,h-12);
+}
+function updateControlsFromStatus(d){
+  controlMode=String(d.mode||controlMode||'AUTO').toUpperCase();
+  renderMode();
+  fingers.forEach(([k])=>{
+    // Auto bars display UNITY/ROBOT command percent, so it matches Unity UI better.
+    const unityVal=Number(d['unity_'+k+'_pct']);
+    const autoVal=Number(d['auto_'+k+'_pct']);
+    const shown=Number.isFinite(unityVal)?unityVal:autoVal;
+    $('auto_'+k).textContent=Math.round(shown||0);
+    bar('auto_'+k+'_bar',shown||0,100,k==='pinky');
+
+    const hand=Number(d['hand_'+k+'_pct']||0);
+    const uni=Number.isFinite(unityVal)?unityVal:(shown||0);
+    const err=Math.abs(hand-uni);
+
+    if($('hand_'+k))$('hand_'+k).textContent=Math.round(hand);
+    if($('unity_'+k))$('unity_'+k).textContent=Math.round(uni);
+    if($('err_'+k))$('err_'+k).textContent=fmt(err,1)+'°';
+
+    const serverM=Number(d['manual_'+k+'_pct']);
+    if(Number.isFinite(serverM)&&document.activeElement!==$('man_'+k)){
+      manual[k]=serverM;
+      $('man_'+k).value=String(Math.round(serverM));
+      $('man_'+k+'_val').textContent=Math.round(serverM)+'%';
+    }
+  })
+}
+async function refresh(){try{const res=await fetch('/api/status?ts='+Date.now());const d=await res.json();lastData=d;const ageMs=Math.max(0,(Date.now()/1000-Number(d.last_update||0))*1000),live=ageMs<2000;$('liveText').textContent=live?'LIVE':'STALE';$('liveDot').style.background=live?'var(--green)':'var(--amber)';$('liveDot').style.boxShadow=live?'0 0 18px var(--green)':'0 0 18px var(--amber)';$('latencyBadge').textContent=Math.round(ageMs)+' ms';setTextClass($('latencyBadge'),live?'green-t':'amber-t');$('topMode').textContent=d.mode||'AUTO';$('topFps').textContent=fmt(d.fps,1);
+  const palmSensor=Boolean(d.palm_sensor), palmTest=Boolean(d.palm_test);
+  if($('palmSensorTop')){$('palmSensorTop').textContent=palmSensor?'ON':'OFF';$('palmSensorTop').className='palm-mini '+(palmSensor?'on':'off')}
+  if($('palmTestTop')){$('palmTestTop').textContent=palmSensor?'LOCK':(palmTest?'ON':'OFF');$('palmTestTop').className='palm-mini '+(palmSensor?'lock':(palmTest?'on':'off'))}
+  if($('palmTestPill')){$('palmTestPill').style.cursor=palmSensor?'not-allowed':'pointer';$('palmTestPill').style.opacity=palmSensor?'.72':'1'}
+  updateControlsFromStatus(d);autoSwitchPage(d);
+  const state=d.grip_state||'UNKNOWN';
+  const od=getDisplayObjectData(d);
+  $('objectName').textContent=od.name;
+  $('objectLabel').textContent=od.label + (objectLatch.active && !hasDetectedObject(d) ? '  · locked' : '');
+  $('gripBadge').textContent=cleanState(state);
+  setBadgeClass($('gripBadge'),upper(state).includes('HOLD')?'green':upper(state).includes('WAIT')?'amber':'');
+  $('massG').textContent=Math.round(Number(od.mass_g||0));
+  $('loadcellN').textContent=fmt(d.loadcell_n,2);
+  $('requiredMin').textContent=fmt(od.required_min_n,2);
+  $('requiredMax').textContent=fmt(od.required_max_n,2);
+  $('targetTotal').textContent=fmt(od.target_total_n,2);
+  if($('autoBadge')){$('autoBadge').textContent=d.auto_state||'READY';setBadgeClass($('autoBadge'),upper(d.auto_state).includes('RUN')?'green':'')}statusText('esp32Status',d.esp32_status||'Unknown');statusText('unityStatus',d.unity_status||'Unknown');
+  const vals={thumb:Number(d.fsr_thumb_n||0),index:Number(d.fsr_index_n||0),middle:Number(d.fsr_middle_n||0),ring:Number(d.fsr_ring_n||0),pinky:Number(d.fsr_pinky_n||0)};
+  const tg={index:Number(d.target_index_n||0),middle:Number(d.target_middle_n||0),ring:Number(d.target_ring_n||0),pinky:Number(d.target_pinky_n||0)};
+  const touchRaw={index:Number(d.touch_target_index_n||0),middle:Number(d.touch_target_middle_n||0),ring:Number(d.touch_target_ring_n||0),pinky:Number(d.touch_target_pinky_n||0)};
+  const activeCount=Number(d.touch_target_active_count||0);
+  const actualGrip=vals.index+vals.middle+vals.ring+vals.pinky;
+  const target=Number(od.target_total_n||d.target_total_n||0);
+  const gState=totalGripState(actualGrip,target,Number(od.required_min_n||d.required_min_n||0),Number(od.required_max_n||d.required_max_n||0),activeCount);
+  if($('actualGripN'))$('actualGripN').textContent=fmt(actualGrip,2);
+  if($('gripStateText')){$('gripStateText').textContent=gState.txt;setTextClass($('gripStateText'),gState.cls)}
+  updatePulsePanel(d);
+  if($('thumbN'))$('thumbN').textContent=fmt(vals.thumb,2);
+  bar('thumbBar',vals.thumb,30,false);
+  ['index','middle','ring','pinky'].forEach(k=>{const b=forceBand(vals[k],touchRaw[k]);if($(k+'N'))$(k+'N').textContent=fmt(vals[k],2);if($(k+'Target'))$(k+'Target').textContent=fmt(tg[k],2);if($(k+'Touch'))$(k+'Touch').textContent=fmt(b.touch,2);if($(k+'Range'))$(k+'Range').textContent=b.active?(fmt(b.low,2)+'-'+fmt(b.high,2)):'0.00-0.00';if($(k+'ForceState')){$(k+'ForceState').textContent=b.state;setTextClass($(k+'ForceState'),b.cls)}bar(k+'Bar',vals[k],18.5,k==='pinky')});drawChart(vals.index,vals.middle,vals.ring,vals.pinky);$('forceBadge').textContent=target>14?'High Force':target>8?'Medium':'Realtime';setBadgeClass($('forceBadge'),target>14?'red':target>8?'amber':'');
+}catch(e){$('liveText').textContent='DISCONNECTED';$('liveDot').style.background='var(--red)';$('liveDot').style.boxShadow='0 0 18px var(--red)'}}
+buildControls();renderMode();setInterval(refresh,180);refresh();
+</script>
+</body>
+</html>"""
+
+
+class _DashboardHandler(BaseHTTPRequestHandler):
+    server_version = "DATNDashboardV40PulsePanelBelow/37.0"
+
+    def _send_bytes(self, code: int, data: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+
+        if path in ("/", "/index.html"):
+            self._send_bytes(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+
+        if path == "/api/logo/school":
+            data, content_type = get_logo_response("school")
+            self._send_bytes(200, data, content_type)
+            return
+
+        if path == "/api/logo/faculty":
+            data, content_type = get_logo_response("faculty")
+            self._send_bytes(200, data, content_type)
+            return
+
+        if path == "/api/status":
+            data = json.dumps(get_dashboard_snapshot(), ensure_ascii=False).encode("utf-8")
+            self._send_bytes(200, data, "application/json; charset=utf-8")
+            return
+
+        if path == "/api/control":
+            data = json.dumps(get_web_control_snapshot(), ensure_ascii=False).encode("utf-8")
+            self._send_bytes(200, data, "application/json; charset=utf-8")
+            return
+
+        if path == "/api/camera/main":
+            data, content_type = get_camera_response("main")
+            self._send_bytes(200, data, content_type)
+            return
+
+        if path == "/api/camera/phone":
+            data, content_type = get_camera_response("phone")
+            self._send_bytes(200, data, content_type)
+            return
+
+        self._send_bytes(404, b"Not Found", "text/plain; charset=utf-8")
+
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/api/control":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw.decode("utf-8", errors="ignore") or "{}")
+                if isinstance(payload, dict):
+                    update_web_control(**payload)
+                data = json.dumps(get_web_control_snapshot(), ensure_ascii=False).encode("utf-8")
+                self._send_bytes(200, data, "application/json; charset=utf-8")
+            except Exception as e:
+                data = json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+                self._send_bytes(500, data, "application/json; charset=utf-8")
+            return
+        self._send_bytes(404, b"Not Found", "text/plain; charset=utf-8")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        # Khong in log moi request /api/status de terminal gon.
+        return
+
+
+def start_web_dashboard(host: str = "0.0.0.0", port: int = 5000, print_link: bool = True, open_browser: bool = False, public: bool = False, ngrok_path: Optional[str] = None) -> str:
+    """
+    Khoi dong web dashboard o thread rieng.
+    Goi 1 lan khi chuong trinh Python bat dau.
+
+    open_browser=True: tu mo tab web tren laptop khi chay code Python chinh.
+    public=True: tu bat ngrok de tao link public gui cho nguoi khac khac mang.
+    ngrok_path="D:/ngrok/ngrok.exe": chi ro vi tri ngrok.exe neu khong co trong PATH.
+    """
+    global _SERVER, _SERVER_THREAD
+
+    links = get_access_links(port)
+
+    if _SERVER is not None:
+        return links["lan"]
+
+    _SERVER = ThreadingHTTPServer((host, port), _DashboardHandler)
+    _SERVER_THREAD = threading.Thread(target=_SERVER.serve_forever, daemon=True)
+    _SERVER_THREAD.start()
+
+    if print_link:
+        print("=" * 86)
+        print("[DATN WEB V9] Dashboard da chay.")
+        print(f"[DATN WEB V9] Laptop local:        {links['local']}")
+        print(f"[DATN WEB V9] Ten may Windows:     {links['hostname']}")
+        print(f"[DATN WEB V9] Thu them .local:      {links['hostname_local']}")
+        print(f"[DATN WEB V9] Dien thoai cung Wi-Fi:{links['lan']}")
+        print(f"[DATN WEB V9] Host name: {links['host_name']} | LAN/IP detect: {links['lan_ip']}")
+        print("[DATN WEB V9] Camera endpoints: /api/camera/main va /api/camera/phone")
+        print("=" * 86)
+
+    if public:
+        start_public_tunnel_ngrok(port=port, ngrok_path=ngrok_path, print_link=print_link)
+
+    if open_browser:
+        try:
+            webbrowser.open(links["local"])
+        except Exception:
+            pass
+
+    return links["lan"]
+
+
+def stop_web_dashboard() -> None:
+    global _SERVER, _SERVER_THREAD, _NGROK_PROCESS, _NGROK_PUBLIC_URL
+
+    if _NGROK_PROCESS is not None:
+        try:
+            _NGROK_PROCESS.terminate()
+        except Exception:
+            pass
+        _NGROK_PROCESS = None
+        _NGROK_PUBLIC_URL = None
+
+    if _SERVER is not None:
+        _SERVER.shutdown()
+        _SERVER.server_close()
+        _SERVER = None
+        _SERVER_THREAD = None
+
+
+if __name__ == "__main__":
+    """
+    Demo doc lap de test giao dien V5.
+    Khi gan vao code chinh thi khong can phan demo nay.
+    """
+    import sys
+
+    # Chay LAN nhu cu:
+    #     python datn_web_dashboard_public.py
+    #
+    # Chay public link cho ban ngoai mang:
+    #     python datn_web_dashboard_public.py --public
+    #
+    # Neu ngrok.exe khong nam trong PATH, dat bien moi truong NGROK_PATH
+    # hoac sua ngrok_path ben duoi, vi du:
+    #     start_web_dashboard(port=5000, public=True, ngrok_path=r"D:\ngrok\ngrok.exe")
+    public_mode = any(arg.lower() in ("--public", "public", "--ngrok", "ngrok") for arg in sys.argv[1:])
+    start_web_dashboard(port=5000, public=public_mode)
+
+    labels = [
+        ("none", "None", 0),
+        ("kimquat_sauce", "Kimquat Sauce", 200),
+        ("red_chili", "Red Chili", 80),
+        ("orange", "Orange", 150),
+    ]
+
+    states = [
+        "FREE_TRACKING_AUTO",
+        "OBJECT_LOCKED_WAIT_PALM",
+        "VISION_GRIP_CLOSING_AUTO",
+        "FORCE_HOLD",
+    ]
+
+    i = 0
+    try:
+        while True:
+            label, name, mass = labels[(i // 85) % len(labels)]
+            state = states[(i // 52) % len(states)]
+            t = time.time()
+
+            base = 4.7 + 3.7 * (0.5 + 0.5 * math.sin(t * 1.15))
+            palm = state in ("VISION_GRIP_CLOSING_AUTO", "FORCE_HOLD")
+
+            def noise(v: float) -> float:
+                return max(0.0, v + random.uniform(-0.22, 0.22))
+
+            update_dashboard(
+                object_label=label,
+                object_name=name,
+                mass_g=mass,
+                grip_state=state,
+                palm_sensor=palm,
+                palm_test=((i // 130) % 2 == 1),
+                loadcell_n=mass / 1000.0 * 9.81,
+                required_min_n=max(0.0, base - 1.5),
+                required_max_n=base + 1.5,
+                target_total_n=base,
+                fps=23.8 + random.uniform(-1.1, 1.1),
+                esp32_status="Connected",
+                unity_status="UDP 5052/5053 OK",
+                serial_note="DEMO MODE",
+                mode="AUTO",
+                auto_state="RUNNING",
+                camera_status="Active",
+                yolo_status="Ready",
+                hand_status="Tracking",
+                fsr_index_n=noise(base * 0.22),
+                fsr_middle_n=noise(base * 0.27),
+                fsr_ring_n=noise(base * 0.19),
+                fsr_pinky_n=noise(base * 0.18),
+            )
+
+            # Demo camera frame cho web khi chay rieng file dashboard.
+            try:
+                import cv2
+                import numpy as np
+                demo_main = np.zeros((540, 960, 3), dtype=np.uint8)
+                demo_phone = np.zeros((540, 960, 3), dtype=np.uint8)
+                demo_main[:] = (18, 24, 36)
+                demo_phone[:] = (24, 18, 32)
+                cv2.putText(demo_main, "MAIN CAMERA - YOLO DEMO", (55, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 220, 255), 3)
+                cv2.putText(demo_main, f"Object: {name}", (55, 145), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (220, 255, 255), 2)
+                cv2.rectangle(demo_main, (310, 170), (650, 430), (0, 255, 180), 4)
+                cv2.putText(demo_main, label, (310, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 180), 2)
+                cv2.putText(demo_phone, "PHONE CAMERA - SECONDARY VIEW", (55, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 170, 80), 3)
+                cv2.putText(demo_phone, f"Grip State: {state}", (55, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (220, 255, 255), 2)
+                cv2.circle(demo_phone, (480, 300), 90, (255, 160, 60), 4)
+                update_camera_frame("main", demo_main)
+                update_camera_frame("phone", demo_phone)
+            except Exception:
+                pass
+
+            i += 1
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        stop_web_dashboard()
+        print("\n[DONE]")

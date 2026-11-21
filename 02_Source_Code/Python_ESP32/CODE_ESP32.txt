@@ -1,0 +1,81 @@
+#include <ESP32Servo.h>
+
+static const int PIN_INDEX  = 27;
+static const int PIN_THUMB  = 26;
+static const int PIN_MIDDLE = 25;
+static const int PIN_PINKY  = 33;
+
+Servo servoIndex, servoThumb, servoMiddle, servoPinky;
+
+int clampi(int v, int lo, int hi){ return (v < lo) ? lo : (v > hi) ? hi : v; }
+
+char buf[64];
+uint8_t bi = 0;
+
+void applyAngles(int idx, int thb, int mid, int pky){
+  idx = clampi(idx, 0, 180);
+  thb = clampi(thb, 0, 180);
+  mid = clampi(mid, 0, 180);
+  pky = clampi(pky, 0, 180);
+
+  servoIndex.write(idx);
+  servoThumb.write(thb);
+  servoMiddle.write(mid);
+  servoPinky.write(pky);
+}
+
+bool parse4(const char* s, int &a, int &b, int &c, int &d){
+  // expect "a,b,c,d"
+  char tmp[64];
+  strncpy(tmp, s, sizeof(tmp)-1);
+  tmp[sizeof(tmp)-1] = 0;
+
+  char* p1 = strchr(tmp, ','); if(!p1) return false; *p1 = 0;
+  char* p2 = strchr(p1+1, ','); if(!p2) return false; *p2 = 0;
+  char* p3 = strchr(p2+1, ','); if(!p3) return false; *p3 = 0;
+
+  a = atoi(tmp);
+  b = atoi(p1+1);
+  c = atoi(p2+1);
+  d = atoi(p3+1);
+  return true;
+}
+
+void setup(){
+  Serial.begin(115200);
+  delay(200);
+
+  servoIndex.setPeriodHertz(50);
+  servoThumb.setPeriodHertz(50);
+  servoMiddle.setPeriodHertz(50);
+  servoPinky.setPeriodHertz(50);
+
+  servoIndex.attach(PIN_INDEX, 500, 2500);
+  servoThumb.attach(PIN_THUMB, 500, 2500);
+  servoMiddle.attach(PIN_MIDDLE, 500, 2500);
+  servoPinky.attach(PIN_PINKY, 500, 2500);
+
+  applyAngles(0,0,0,0);
+  Serial.println("READY 4SERVO (format: index,thumb,middle,pinky)");
+}
+
+void loop(){
+  while (Serial.available()){
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+
+    if (c == '\n'){
+      buf[bi] = 0;
+      bi = 0;
+
+      int a,b,d,e;
+      if (parse4(buf, a,b,d,e)){
+        applyAngles(a,b,d,e);
+      }
+      return;
+    }
+
+    if (bi < sizeof(buf)-1) buf[bi++] = c;
+    else bi = 0;
+  }
+}

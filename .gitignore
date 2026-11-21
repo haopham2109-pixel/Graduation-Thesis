@@ -1,0 +1,25 @@
+﻿# Unity generated data
+**/Library/
+**/Temp/
+**/Obj/
+**/Logs/
+**/UserSettings/
+**/Build/
+**/Builds/
+**/MemoryCaptures/
+**/Recordings/
+.vs/
+
+# IDE and temporary data
+*.suo
+*.user
+*.tmp
+*.bak
+*.log
+
+# Archive/installers are not source files for this public repository
+*.rar
+*.zip
+*.7z
+*.exe
+*.msi
